@@ -246,6 +246,25 @@ class Auth extends _$Auth {
     return crypto.sign(challenge, secretKey);
   }
 
+  /// Update the in-memory keypair after a key rotation proposal is submitted.
+  ///
+  /// The new keypair has already been persisted to secure storage by the caller.
+  /// The session token is unchanged — the user re-authenticates once the proposal
+  /// is approved and they tap "Clear & re-authenticate".
+  void updateKeypairAfterRotation({
+    required Uint8List newPublicKey,
+    required Uint8List newSecretKey,
+    required Uint8List newEncPublicKey,
+    required Uint8List newEncPrivateKey,
+  }) {
+    state = state.copyWith(
+      publicKey: newPublicKey,
+      secretKey: newSecretKey,
+      encryptionPublicKey: newEncPublicKey,
+      encryptionPrivateKey: newEncPrivateKey,
+    );
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────
 
   Future<void> _restoreSession() async {

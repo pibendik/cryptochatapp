@@ -57,6 +57,11 @@ class _MembersScreenState extends ConsumerState<MembersScreen> {
         title: const Text('Group Members'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.how_to_vote_outlined),
+            tooltip: 'Proposals',
+            onPressed: () => context.push('/proposals'),
+          ),
+          IconButton(
             icon: Icon(_searchActive ? Icons.search_off : Icons.search),
             tooltip: _searchActive ? 'Close search' : 'Search',
             onPressed: () => setState(() {
@@ -303,6 +308,24 @@ class _MemberSheet extends StatelessWidget {
             },
             icon: const Icon(Icons.chat_bubble_outline),
             label: const Text('Send message'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).pop();
+              context.push('/proposals/remove?label=${Uri.encodeComponent(member.displayName)}');
+            },
+            icon: Icon(Icons.person_remove,
+                color: Theme.of(context).colorScheme.error),
+            label: Text(
+              'Propose remove',
+              style:
+                  TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(
+                  color: Theme.of(context).colorScheme.error),
+            ),
           ),
         ],
       ),

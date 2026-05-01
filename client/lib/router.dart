@@ -6,10 +6,14 @@ import 'features/auth/auth_provider.dart';
 import 'features/auth/screens/onboarding_screen.dart';
 import 'features/chat/screens/chat_list_screen.dart';
 import 'features/chat/screens/chat_screen.dart';
+import 'features/consensus/screens/proposals_screen.dart';
+import 'features/consensus/screens/propose_member_screen.dart';
 import 'features/ephemeral/screens/ephemeral_chat_screen.dart';
 import 'features/forum/screens/forum_screen.dart';
 import 'features/profile/screens/members_screen.dart';
 import 'features/profile/screens/profile_screen.dart';
+import 'features/settings/screens/emergency_revoke_screen.dart';
+import 'features/settings/screens/key_rotation_screen.dart';
 
 part 'router.g.dart';
 
@@ -63,6 +67,28 @@ GoRouter router(Ref ref) {
       GoRoute(
         path: '/onboarding',
         builder: (context, state) => const OnboardingScreen(),
+      ),
+      GoRoute(
+        path: '/proposals',
+        builder: (context, state) => const ProposalsScreen(),
+      ),
+      GoRoute(
+        path: '/proposals/add',
+        builder: (context, state) =>
+            const ProposeMemberScreen(action: 'ADD'),
+      ),
+      GoRoute(
+        path: '/proposals/remove',
+        builder: (context, state) =>
+            const ProposeMemberScreen(action: 'REMOVE'),
+      ),
+      GoRoute(
+        path: '/settings/rotate-key',
+        builder: (context, state) => const KeyRotationScreen(),
+      ),
+      GoRoute(
+        path: '/settings/emergency-revoke',
+        builder: (context, state) => const EmergencyRevokeScreen(),
       ),
     ],
   );

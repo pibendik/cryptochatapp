@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../../core/utils/hex_utils.dart';
@@ -200,6 +201,30 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         FilledButton.tonal(
           onPressed: () => _startEditing(bio, skills),
           child: const Text('Edit profile'),
+        ),
+        const SizedBox(height: 28),
+        // ── Security section ──
+        const Divider(),
+        const SizedBox(height: 8),
+        const Text('Security',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+        const SizedBox(height: 8),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.sync_alt),
+          title: const Text('Rotate my key'),
+          subtitle: const Text('Got a new phone or reinstalled?'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => context.push('/settings/rotate-key'),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(Icons.report_problem_outlined,
+              color: Theme.of(context).colorScheme.error),
+          title: const Text('Report compromised key'),
+          subtitle: const Text('Emergency: lock out a stolen device'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => context.push('/settings/emergency-revoke'),
         ),
       ],
     );

@@ -9,6 +9,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../../core/models/contact.dart';
 import '../../../core/utils/hex_utils.dart';
+import '../../consensus/consensus_provider.dart';
 import '../auth_provider.dart';
 import '../contacts_provider.dart';
 
@@ -130,9 +131,23 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         }
 
         try {
-          await ref.read(contactsProvider.notifier).addContact(contact);
+          await ref.read(consensusProvider.notifier).proposeMemberAdd(
+                signingKey,
+                contact.displayName,
+              );
           if (mounted) setState(() => _scannedContacts.add(contact));
-          _showSnackBar('Added ${contact.displayName} ✓');
+          _showSnackBar(
+            'Proposal submitted for ${contact.displayName} — waiting for a second approval.',
+          );
+        } on StateError catch (_) {
+          // Not yet authenticated — fall back to local contact add.
+          try {
+            await ref.read(contactsProvider.notifier).addContact(contact);
+            if (mounted) setState(() => _scannedContacts.add(contact));
+            _showSnackBar('Added ${contact.displayName} ✓');
+          } on DuplicateContactException catch (dup) {
+            _showSnackBar('Already have ${dup.displayName} in your contacts');
+          }
         } on DuplicateContactException catch (e) {
           _showSnackBar('Already have ${e.displayName} in your contacts');
         }

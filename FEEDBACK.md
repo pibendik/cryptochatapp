@@ -402,3 +402,219 @@ Once the compiler is trained to ignore dead code warnings, unused code from remo
 
 **3. Do not add Phase 2 features on top of per-message DB queries without first caching group membership.**
 The two `fetch_user_group` calls per message are fine at 20 users. Adding forum-board notifications, presence updates, and message history to the same relay path in Phase 2 will multiply the DB load significantly. Cache the sender's `group_id` at WS connect time. This is a single-session-scoped optimisation that eliminates the majority of relay DB queries and takes an afternoon to implement.
+
+---
+
+# Round 3 Feedback — Post Phase 2 Implementation
+
+> Seven expert personas review the Phase 2 implementation directly from source code. Each reviewer read: `chat_screen.dart`, `chat_list_screen.dart`, `forum_screen.dart`, `profile_screen.dart`, `members_screen.dart`, `presence_dot.dart`, `connection_banner.dart`, `app_database.dart`, `ws_client.dart`, `forum/handlers.rs`, `profiles/handlers.rs`, and `relay/ws_handler.rs`.
+
+---
+
+## 1. UX Designer
+
+**What improved since Round 2**
+
+The `ConnectionBanner` is the standout improvement. An animated amber bar reading "⚠ Reconnecting… (N messages queued)" is exactly the right mental model for users — it's honest about the failure state, actionable in what it implies ("your messages are safe, sit tight"), and scoped to only appear in `ChatListScreen` where it matters. The `PresenceDot` widget is also well-executed: it uses `presenceProvider.select(...)` so it only rebuilds when that specific user's status changes, and the `Tooltip` wrapping it makes the coloured dot accessible to users who can't distinguish green from grey.
+
+`MembersScreen` now has skill-chip filtering and a name search bar — this directly answers Round 1's recommendation to build a skills directory. The filter UX is functional and the `FilterChip` pattern is idiomatic Flutter. The `ProfileScreen` fingerprint card with a copy-to-clipboard button and a tooltip explaining its purpose is genuinely good design — it introduces a security concept without demanding the user already understand it.
+
+**New concerns introduced in Phase 2**
+
+Every `_ConversationTile` in `ChatListScreen` shows `subtitle: const Text('Tap to open chat')` — the same text for every entry, regardless of state. There is no last-message preview, no timestamp, no unread count. A user returning to the app after an hour cannot tell which conversation has new messages without opening each one. This is table-stakes chat UX that was presumably deferred, but it makes the list screen feel like a navigation menu rather than a messaging inbox.
+
+The floating action button in `ChatListScreen` is completely silent when tapped: `onPressed: () { /* BLOCKED(phase-3): ephemeral help-request chat creation */ }`. No snackbar, no dialog, nothing. To a tester or early adopter this reads as a broken button. Even a modal saying "Ephemeral help chats are coming in the next update" would preserve trust.
+
+The forum is largely non-functional for actual users: `const bodyText = '[encrypted body]'` is a compile-time constant, meaning every post body shows the same placeholder forever until that line is manually changed. The post *title*, however, is displayed in plaintext — users will naturally write sensitive information in the most visible field. This creates a false sense of what is and isn't private.
+
+The `_selectedSkills` filter in `MembersScreen` uses AND logic — selecting "cooking" AND "first aid" returns only members with both. There is no UI indication of this behaviour. Most users will expect OR logic ("show me anyone who knows either"). The filter bar should label this clearly or switch to OR.
+
+**Concrete Phase 3 recommendation**
+
+Before wiring encryption, wire last-message preview into `_ConversationTile`. Fetch the most recent `MessagesTableData` per `conversationId` from the drift stream and show its timestamp and a truncated preview (or "1 new message" if `isDelivered == false`). Users who can't tell whether a conversation has new messages will not engage with the chat feature, regardless of how well the crypto works.
+
+**Risk rating: MEDIUM** — the UI skeleton is coherent but the silent FAB and static "Tap to open chat" subtitle will erode tester confidence before Phase 3 ships.
+
+---
+
+## 2. Security Expert
+
+**What improved since Round 2**
+
+The most important fix shipped: the WS session token is no longer in the URL. `ws_client.dart` line 117 sends `{'type': 'auth', 'token': sessionToken}` as the first WebSocket message. This eliminates the credential-in-proxy-log vulnerability called out in Round 2. The 10-second auth timeout in `ws_handler.rs` (`tokio::time::timeout(Duration::from_secs(10), ...)`) is correct and consistent with the design spec. Group membership enforcement at the WS relay layer is now real: `sender_group_id` is fetched once at connect and the `handle_send` path validates that sender and recipient share a group UUID without a per-message DB query.
+
+The drift schema shows the right instincts: `MessagesTable.payload` is commented "ALWAYS ciphertext — decrypt before display" and `plaintextCache` is nullable, modelling the pre/post-decryption lifecycle explicitly. The `OutboundQueueTable.payload` field is also marked "encrypted envelope payload" — the schema is designed for the encrypted world even before the crypto is wired.
+
+**New concerns introduced in Phase 2**
+
+The forum post **title** is plaintext end-to-end. `CreatePostRequest` in `forum/handlers.rs` defines `pub title: String` — stored verbatim in the database, logged by tracing, visible to anyone with DB read access. In a mutual aid context, post titles like "I need help escaping an abusive partner" or "Housing crisis — can't pay rent" are the most sensitive content in the system. The body has a crypto placeholder; the title has none.
+
+`GET /users/:id/profile` in `profiles/handlers.rs` has an explicit comment: `BLOCKED(phase-2): group membership check not yet enforced here`. Any authenticated user — including those from other groups — can enumerate any profile by UUID. If user UUIDs are ever guessable or leaked via another vector, this is a full profile data breach.
+
+The `OfflineQueue` in `ws_handler.rs` is `Arc<RwLock<HashMap<Uuid, Vec<String>>>>` — in-memory, lost on server restart. A server reboot during a crisis (exactly the moment a mutual aid server is most likely to be stressed) silently discards queued messages with no notification to sender or recipient.
+
+`plaintextCache` in `MessagesTable` has a BLOCKED comment noting it must be cleared on MLS epoch rotation. This is not just a performance note — it is a forward secrecy requirement. If Phase 3 wires encryption but forgets to invalidate the cache on epoch rotation, users will read post-rotation messages with pre-rotation keys cached from before the epoch change.
+
+**Concrete Phase 3 recommendation**
+
+Encrypt forum post titles with the group key before Phase 3 ships, even if it's just `ChaCha20Poly1305(group_key, title_bytes)` with the result base64-encoded into the existing `title` column. The title field is more sensitive than the body because it is the first thing a helper reads, and it is currently in cleartext on the server.
+
+**Risk rating: HIGH** — unencrypted forum post titles may expose the most sensitive content in the system at rest in the database and in server logs before Phase 3 ships.
+
+---
+
+## 3. Bored Senior Developer
+
+**What improved since Round 2**
+
+The drift schema is clean. Five tables, typed companions, `insertOnConflictUpdate` used correctly throughout, and the `forTesting` constructor is a small touch that will pay dividends the moment someone writes an integration test. The `_ComposeBar` correctly adds and removes its controller listener in `initState`/`dispose` — easy to get wrong, done right here. `AnimatedSwitcher` in `ConnectionBanner` with a `SizeTransition` is the correct animation primitive for a collapsing/expanding banner; whoever wrote this knows Flutter's animation layer.
+
+The BLOCKED comment convention is genuinely useful — `BLOCKED(phase-3): encrypt with recipient's X25519 key before sending` in `_send()` is more informative than a vague TODO and directly traceable to the roadmap.
+
+**New concerns introduced in Phase 2**
+
+`final profileData = profile as dynamic;` in `profile_screen.dart` line 68. The Riverpod `profileNotifierProvider` presumably returns a typed model. Casting it to `dynamic` to access `displayName` and `skillsJson` will produce `Null` at runtime if the type changes — no compile-time error, no helpful stack trace, just a blank screen. This should be a typed model with a null-safe accessor.
+
+`_messageStream` is initialized in `initState` with `ref.read(chatProvider).watchMessages(...)`. This stream is captured once and never updated. If the router pushes a new `ChatScreen` for a different `conversationId` via `pushReplacement` rather than a full rebuild, the old stream for the previous conversation will keep emitting. This is a subtle state-leak bug that will manifest as messages appearing in the wrong conversation.
+
+`WsClient` has both `isConnected` and `isCurrentlyConnected` as getters, both returning `_state == WsConnectionState.connected`. One of them is dead code. The compiler would catch this if `#![allow(dead_code)]` wasn't in the Rust side — same energy, different language.
+
+`withOpacity` is deprecated in Flutter 3.x in favour of `.withValues(alpha:)` — appears twice in `_MessageBubble`. `surfaceVariant` is deprecated in Material 3 (use `surfaceContainerHighest`) — appears in the `MembersScreen` filter bar background. These will generate analysis warnings as Flutter versions advance.
+
+`_PostCard` in `forum_screen.dart` calls `ref.watch` three times: `contactsProvider`, `forumNotifierProvider`, `serverUrlProvider`. Any contact list change — including a presence update that has nothing to do with the forum — triggers a full rebuild of every visible PostCard. For a 30-post forum with 20 contacts updating presence, this is a lot of unnecessary widget work.
+
+**Concrete Phase 3 recommendation**
+
+Replace `profile as dynamic` with a typed `UserProfile` model before Phase 3 adds MLS key packages, epoch IDs, and credential blobs to the profile. Adding crypto fields through a `dynamic` cast will produce runtime errors that are invisible to the type checker and extremely unpleasant to debug during a key rotation ceremony.
+
+**Risk rating: LOW** — these are code quality issues, not correctness failures, but they will compound as Phase 3 adds complexity on top of them.
+
+---
+
+## 4. Senior Architect
+
+**What improved since Round 2**
+
+The architectural boundary between relay and application logic is cleaner than in Phase 1. `ws_handler.rs` is a self-contained module: it owns the auth handshake, group enforcement, presence broadcast, and offline queue. It does not bleed into forum or profile logic. The decision to cache `sender_group_id` at WS connect time is exactly right — it was a specific Round 2 recommendation and it landed correctly: fetched once, never queried per message, passed explicitly into `handle_send`.
+
+The `RwLock` scoping is correct throughout: `senders` is collected into a `Vec` while holding the read lock, the lock is dropped, and then `try_send` is called without holding any lock. This is the canonical pattern for avoiding deadlocks in async Rust and it is consistently applied.
+
+The drift schema in `app_database.dart` properly separates the `OutboundQueueTable` as a persistence layer for the outbound message queue — the schema is designed for the right use case.
+
+**New concerns introduced in Phase 2**
+
+**Offline group message delivery is architecturally incomplete.** `ws_handler.rs` line 357 contains an explicit comment: "Offline group-message recipients are not queued (direct messages only)." This asymmetry — direct messages queued, group messages dropped — is not visible anywhere in the client UI and will produce silent data loss. In a group of 10, if 3 members are offline when a help request is posted to the group channel, they never receive it. With Phase 3 adding MLS group key material distributed via group messages, this gap becomes a cryptographic correctness problem, not just a UX inconvenience.
+
+**The `OutboundQueueTable` exists in the drift schema but is not wired to `WsClient`.** The table has exactly the right columns (`toId`, `payload`, `queuedAt`, `attempts`). The BLOCKED comment on `ws_client.dart` line 57 says "persist outbound queue to drift OutboundQueueTable for crash-safety." This was supposed to land in Phase 2. The current `Queue<_OutboundMessage>` is in-memory and discarded on app restart. A user who sends 5 messages, force-closes the app, and reopens will see those messages in the `isDelivered == false` state with no way to resend.
+
+**The `ForumPostsTable` has no row limit enforced by `watchForumPosts()`**, which fetches all rows ordered by `createdAt DESC`. This is a reactive drift stream, meaning the entire post list is re-emitted on every database change. Combined with `_PostCard` watching three providers, a single post resolution could trigger re-renders of hundreds of rows.
+
+**Concrete Phase 3 recommendation**
+
+Define the MLS group state as a first-class provider — `mlsGroupProvider` — that owns the current epoch, the group key, and the member set. Both `broadcast_presence` (which currently queries the DB on every connect) and `handle_send` (which queries per group message) should source group membership from this provider rather than `fetch_group_member_ids`. This is the natural container for the cached membership that Phase 3 requires and it eliminates the last remaining per-event DB queries.
+
+**Risk rating: MEDIUM** — the architecture is sound for a 20-user single-node pilot, but the two persistence gaps (offline group messages dropped, outbound queue not persisted) must close before any production deployment.
+
+---
+
+## 5. Normal Programmer
+
+**What improved since Round 2**
+
+The code is readable. Each widget has a clear job and a clear boundary. `_MessageBubble` is a stateless widget that takes a message and a boolean — easy to understand, easy to test. `_ComposeBar` is extracted into its own stateful widget with its own controller lifecycle, which is the right call; it keeps `ChatScreen`'s `build` method clean. The `BLOCKED(phase-X)` comment pattern tells me exactly what's missing and when it's planned, which as a developer is far more useful than a vague TODO.
+
+The forum screen's pull-to-refresh (`RefreshIndicator` wrapping the `ListView`) and the empty state with the `help_outline` icon and "Be the first to ask!" copy are small touches that make the app feel considered rather than assembled. The `_formatRelativeTime` helper is a single readable function rather than a dependency on a third-party package — appropriate for the scale.
+
+**New concerns introduced in Phase 2**
+
+Tapping the FAB on `ChatListScreen` does absolutely nothing — no feedback, no message, complete silence. As a tester filing bugs, this is my first report. A single `ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ephemeral chats coming in Phase 3!')))` would eliminate an entire category of tester confusion for zero engineering cost.
+
+`const bodyText = '[encrypted body]'` on line 131 of `forum_screen.dart` is declared as a `const` variable. When Phase 3 wires decryption, the developer will change `const` to a computed value — but the risk is that it gets left as a const and the decryption path is wired in a parallel branch that never reaches this variable. A `// BLOCKED(phase-3): replace with forum.decryptBody(post)` comment on the same line as the assignment would make the connection explicit.
+
+The `// TODO: move to app config provider` comment next to `const serverUrl = 'http://localhost:8000'` in `profile_screen.dart` is exactly the kind of thing that ships. Every HTTP call in Phase 3 that builds on `profileNotifierProvider` will silently use localhost as its base URL unless this is resolved first.
+
+Anyone can tap "Mark resolved" on any forum post. The BLOCKED comment acknowledges this but testers will file it as a bug. Even a `disabled` state on the button with a tooltip "Only the post author can resolve" would set expectations correctly until the membership API is ready.
+
+**Concrete Phase 3 recommendation**
+
+Add a one-line stub handler to the `ChatListScreen` FAB `onPressed` before Phase 3 ships ephemeral chat. Show a bottom sheet that says "Raise a help request — tap to let your group know you need support." Shipping a silent button into a crisis-support app is a trust problem, not just a UX problem.
+
+**Risk rating: LOW** — the code is clean and the BLOCKED comments tell a coherent story. The main gap is a handful of easily-fixed placeholder issues that will confuse testers and early users before Phase 3 closes them.
+
+---
+
+## 6. QA Champion
+
+**What improved since Round 2**
+
+`AppDatabase.forTesting(super.e)` is a proper seam for unit and integration tests — drift's in-memory backend can be passed directly. `isDelivered` on `MessagesTable` gives a boolean state to assert against in delivery-confirmation tests. All async operations in `ForumScreen` and `ProfileScreen` use `context.mounted` checks before calling `ScaffoldMessenger` — a common Flutter bug is fixed proactively here. The `_ComposeBar.onSend` being a `Future<void> Function()` means callers can await it in widget tests.
+
+The 10-second auth timeout in `ws_handler.rs` is testable: inject a mock stream that sends nothing, assert that the server closes with code 4001. The bounded mpsc channel (capacity 256) is also assertable — tests can fill the channel and verify `try_send` returns `Err`.
+
+**New concerns introduced in Phase 2**
+
+`watchGroupMembers` in `app_database.dart` filters by `userId.isNotValue(ownUserId)` — it excludes the current user but does not enforce group membership. A test that inserts profiles for three users from two different groups will receive all of them from this stream. Any test asserting group isolation via `MembersScreen` is testing a false invariant.
+
+`_formatRelativeTime` in `forum_screen.dart` calls `DateTime.now()` internally. This function is not injectable: tests that run at different times of day will produce different outputs ("just now" vs "1 min ago"), making snapshot tests fragile and making it impossible to test the "yesterday" branch without manipulating the system clock. The function needs a `DateTime now` parameter with a default of `DateTime.now()`.
+
+`resolve_post` in `forum/handlers.rs` calls `ForumPost::resolve(&pool, id, auth.user_id)`. Whether `auth.user_id` is actually compared to `post.author_id` inside the model is not visible from the handler. The BLOCKED comment on the Flutter side (`// BLOCKED(phase-2): restrict resolve to author + group members`) implies this is not yet enforced. A test that calls `resolve_post` with a user who did not author the post should return 403 — currently it likely returns 200.
+
+The 500-message FIFO overflow behaviour in `WsClient.enqueue` — dropping the oldest message and printing a warning — has no test. This is a silent data-loss path that is also security-adjacent: a fast sender can deliberately overflow the queue to push out legitimate messages.
+
+**Concrete Phase 3 recommendation**
+
+Add a `now` parameter to `_formatRelativeTime` before Phase 3 adds timestamp-sensitive ephemeral chat expiry logic. The same untestable `DateTime.now()` pattern, if copied into an ephemeral chat "expires in N minutes" display, will make that feature's timing logic completely untestable without mocking the system clock.
+
+**Risk rating: MEDIUM** — `watchGroupMembers` silently returns cross-group data, `resolve_post` authorization is unverified, and the queue overflow path is untested. Two of these three are currently incorrect by design, not just uncovered.
+
+---
+
+## 7. Performance Tester
+
+**What improved since Round 2**
+
+The `group_id` caching in `ws_handler.rs` is the most impactful performance change in Phase 2. Every `handle_send` call previously would have required a DB round-trip to verify group membership; now `sender_group_id` is a stack variable passed through the call chain. The `RwLock` read-before-collect-before-send pattern in both `handle_send` and `broadcast_presence` is correct: the lock is held only for the `HashMap` lookup, dropped before any channel send. This eliminates lock contention across concurrent message deliveries.
+
+`PresenceDot` uses `presenceProvider.select((map) => map[userId] ?? PresenceStatus.offline)` — this is the correct Flutter pattern for fine-grained subscription. A presence update for user A will rebuild only the `PresenceDot` for user A, not every dot on screen.
+
+**New concerns introduced in Phase 2**
+
+`broadcast_presence` in `ws_handler.rs` still issues two DB queries on every connect and disconnect: `fetch_user_group` and `fetch_group_member_ids`. In a 30-member group where everyone is on a flaky mobile network in a crisis scenario, a connect/disconnect storm of 10 events per second generates 20 DB queries per second from this function alone, before any message routing. The BLOCKED comment on line 367 acknowledges this but flags it for after Phase 3 — it should be resolved sooner.
+
+`_PostCard` in `forum_screen.dart` registers three `ref.watch` calls: `contactsProvider`, `forumNotifierProvider`, and `serverUrlProvider`. `contactsProvider` updates on presence changes. This means every presence update in the app — every online/offline transition for any group member — triggers a full rebuild of every visible `_PostCard`. For a forum with 20 posts and a 30-member group with frequent presence churn, this generates a continuous stream of unnecessary widget rebuilds.
+
+`decodeProfileData` is called twice per `setState` in `MembersScreen` — once in `_applyFilters` and once in `_allSkills` — iterating the full member list and parsing a JSON string per member each time. Typing a single character in the name filter calls `setState`, which calls both functions. For a group of 50 members with 5 skills each, this is 100 JSON parse operations per keypress.
+
+`watchForumPosts()` has no `LIMIT` clause. The drift reactive stream re-emits the complete post list on every DB change (including resolving a post). Combined with the `_PostCard` multi-watch issue, resolving one post causes a full list re-render with JSON parses.
+
+**Concrete Phase 3 recommendation**
+
+Introduce a `groupMemberCacheProvider` that is populated once on WS connect and exposes the current member list as an in-memory `List<Uuid>`. Feed it into both `broadcast_presence` and `handle_send` on the server, and into `_applyFilters` / `_allSkills` on the client (pre-parsed, not JSON strings). Phase 3 will implement MLS epoch rotation — the natural invalidation trigger for this cache — making the timing exactly right to build it there.
+
+**Risk rating: MEDIUM** — performance is acceptable for a 20-user pilot but the presence-churn DB storm and per-PostCard multi-watch will degrade noticeably at 50+ users on unreliable networks, which is exactly the deployment context this app targets.
+
+---
+
+## Phase 3 Recommendations (consolidated from Round 3)
+
+### Top 3 DOs for Phase 3
+
+**1. DO encrypt forum post titles client-side before Phase 3 ships.**
+The `CreatePostRequest.title: String` field in `forum/handlers.rs` is stored verbatim in the database and appears in server logs via tracing. In a mutual-aid context, titles like "I need help leaving an abusive home" are the most sensitive content the system will handle. Apply the same group-key symmetric encryption to the title as will be applied to the body — even a single `ChaCha20Poly1305(group_key, title_bytes)` pass stored as base64 in the existing column is sufficient until MLS is fully wired.
+
+**2. DO wire the existing `OutboundQueueTable` to `WsClient` before adding any new messaging features.**
+The drift table was designed in Phase 2 with exactly the right schema (`toId`, `payload`, `queuedAt`, `attempts`) but `WsClient` still uses an in-memory `Queue<_OutboundMessage>`. The queue is silently discarded on app restart. Every new messaging feature built in Phase 3 — ephemeral chats, group key distribution messages — will inherit this silent data-loss behaviour. The persistence path is a bounded engineering task: write to drift on `enqueue`, read and drain on `connect`, delete on successful send.
+
+**3. DO build a typed profile model to replace `profile as dynamic` before adding MLS fields.**
+`profile_screen.dart` line 68 casts the `profileNotifierProvider` result to `dynamic` to access `displayName` and `skillsJson`. Phase 3 will add key packages, epoch identifiers, and MLS credential blobs to the user profile. Adding crypto fields through a `dynamic` cast produces runtime errors that are invisible to the type checker and extremely difficult to debug during a live key rotation event.
+
+### Top 3 DON'Ts for Phase 3
+
+**1. DON'T ship `const serverUrl = 'http://localhost:8000'` into Phase 3.**
+The hardcoded URL in `profile_screen.dart` (with its `// TODO: move to app config provider` comment) will silently route all profile HTTP calls to localhost in any non-development deployment. Phase 3 will add more HTTP calls for key distribution and allowlist management — each one will inherit this bug if the config provider isn't built first. Fix the plumbing before laying more pipe.
+
+**2. DON'T let offline group message delivery remain broken through Phase 3.**
+`ws_handler.rs` line 357 explicitly drops messages to offline group members: "Offline group-message recipients are not queued (direct messages only)." Phase 3 will distribute MLS key material via group messages. If a member is offline when a key update is sent, they will receive no update, fail to decrypt future messages, and have no way to recover without a manual re-add. The group offline queue gap is a UX problem today and a cryptographic correctness problem in Phase 3.
+
+**3. DON'T forget to implement `plaintextCache` invalidation on MLS epoch rotation.**
+`MessagesTable` has a `plaintextCache` column with a `BLOCKED(phase-3)` comment: "plaintextCache must be cleared on MLS epoch rotation." This is not a performance optimisation — it is a forward secrecy requirement. If the cache is populated by Phase 3's decryption wiring but never invalidated on epoch rotation, users will read post-rotation messages decrypted with pre-rotation cached keys. The MLS epoch rotation and the cache invalidation must be a single atomic operation, not two separate tasks that can be accidentally shipped out of order.

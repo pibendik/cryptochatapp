@@ -1,0 +1,18 @@
+# Development overrides — automatically merged by Docker Compose in local dev.
+# DO NOT deploy this file to production.
+#
+# What this adds:
+#   - postgres: publishes port 5432 to localhost so `cargo run` can connect directly
+#   - backend: publishes port 8080 to localhost so you can hit the API without Caddy
+#
+# Usage: just run `docker compose up -d` as usual — this file is picked up automatically.
+# To run WITHOUT these overrides (production-like): docker compose -f docker-compose.yml up -d
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"   # localhost only — not exposed to the network
+
+  backend:
+    ports:
+      - "127.0.0.1:8080:8080"

@@ -8,11 +8,6 @@ import '../../core/db/app_database.dart';
 import '../../core/db/database_provider.dart';
 import '../auth/auth_provider.dart';
 
-/// Server base URL used for all forum HTTP calls. Override in tests or settings.
-final serverUrlProvider = StateProvider<String>(
-  (ref) => 'http://localhost:8000',
-);
-
 /// Manages forum post operations: watch from local DB, sync from server,
 /// create new posts, and resolve existing posts.
 class ForumNotifier {

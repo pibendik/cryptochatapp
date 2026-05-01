@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../core/db/app_database.dart';
 import '../../auth/contacts_provider.dart';
 import '../forum_provider.dart';
@@ -14,7 +15,7 @@ class ForumScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final forum = ref.watch(forumNotifierProvider);
-    final serverUrl = ref.watch(serverUrlProvider);
+    final serverUrl = ref.watch(appConfigProvider).serverUrl;
 
     return Scaffold(
       appBar: AppBar(
@@ -120,7 +121,7 @@ class _PostCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final contacts = ref.watch(contactsProvider).valueOrNull ?? [];
     final forum = ref.watch(forumNotifierProvider);
-    final serverUrl = ref.watch(serverUrlProvider);
+    final serverUrl = ref.watch(appConfigProvider).serverUrl;
 
     final matchingContacts = contacts.where((c) => c.id == post.authorId);
     final authorName = matchingContacts.isNotEmpty

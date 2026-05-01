@@ -4,6 +4,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
+import '../../core/config/app_config.dart';
 import '../../core/db/app_database.dart';
 import '../../core/db/database_provider.dart';
 import '../../core/models/envelope.dart';
@@ -18,12 +19,9 @@ part 'chat_provider.g.dart';
 @riverpod
 WsClient wsClient(Ref ref) {
   final client = WsClient(
-    uri: Uri.parse(
-      // TODO: read from config / environment
-      const String.fromEnvironment(
-          'WS_URL', defaultValue: 'wss://localhost:8080/ws'),
-    ),
+    uri: Uri.parse(ref.watch(appConfigProvider).wsUrl),
     secureStorage: ref.read(secureStorageProvider),
+    db: ref.read(appDatabaseProvider),
   );
   ref.onDispose(client.disconnect);
   return client;
@@ -60,7 +58,7 @@ class _ChatService {
       createdAt: Value(DateTime.now()),
       isDelivered: const Value(false),
     ));
-    _wsClient.enqueue(toId, encryptedPayload);
+    await _wsClient.enqueue(toId, encryptedPayload);
   }
 
   /// Handle an inbound envelope: stub-decrypt and persist as delivered.
@@ -77,6 +75,17 @@ class _ChatService {
     ));
   }
 }
+
+/// Watches the most recent message for [conversationId].
+///
+/// Emits `null` when no messages exist yet for that conversation.
+final lastMessageProvider =
+    StreamProvider.autoDispose.family<MessagesTableData?, String>(
+  (ref, conversationId) {
+    final db = ref.watch(appDatabaseProvider);
+    return db.watchLastMessage(conversationId);
+  },
+);
 
 /// Provides access to [_ChatService] for sending messages and watching streams.
 final chatProvider = Provider.autoDispose<_ChatService>((ref) {

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../core/utils/hex_utils.dart';
 import '../../auth/auth_provider.dart';
 import '../profile_provider.dart';
@@ -56,8 +57,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   Widget build(BuildContext context) {
     final profileAsync = ref.watch(profileNotifierProvider);
     final authState = ref.watch(authProvider);
-    // ServerUrl: auth screen passes it in; for now derive from stored state.
-    const serverUrl = 'http://localhost:8000'; // TODO: move to app config provider
+    // ServerUrl: read from app config provider.
+    final serverUrl = ref.watch(appConfigProvider).serverUrl;
 
     return Scaffold(
       appBar: AppBar(title: const Text('My Profile')),

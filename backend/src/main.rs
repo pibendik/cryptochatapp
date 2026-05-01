@@ -6,7 +6,7 @@ use axum::{
     extract::{FromRef, State},
     http::{header, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
+    routing::{patch, post, put},
     Json, Router,
 };
 use rand::RngCore;
@@ -113,6 +113,37 @@ async fn main() {
     spawn_challenge_cleanup(state.challenges.clone());
     spawn_session_cleanup(state.sessions.clone());
 
+    // Cleanup task: delete acknowledged messages after 1 minute
+    // Average server-side message lifetime: seconds to minutes
+    {
+        let pool = state.db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let _ = sqlx::query(
+                    "DELETE FROM messages WHERE acknowledged_at < NOW() - INTERVAL '1 minute'"
+                )
+                .execute(&pool)
+                .await;
+            }
+        });
+    }
+
+    // Cleanup task: delete resolved or old forum posts after 30 days
+    {
+        let pool = state.db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await; // hourly
+                let _ = sqlx::query(
+                    "DELETE FROM forum_posts WHERE resolved = true OR created_at < NOW() - INTERVAL '30 days'"
+                )
+                .execute(&pool)
+                .await;
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let addr: SocketAddr = cfg
@@ -147,6 +178,7 @@ fn build_router(state: AppState) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
+    use axum::routing::get;
     Router::new()
         // Health check — no auth required.
         .route("/health", get(health_handler))
@@ -158,6 +190,9 @@ fn build_router(state: AppState) -> Router {
         .route("/users/me/profile", put(profiles::handlers::update_profile))
         .route("/users/:id/profile", get(profiles::handlers::get_profile))
         .route("/groups/me/members", get(profiles::handlers::list_group_members))
+        // Message ACK routes — sealed-envelope model.
+        .route("/messages/pending", get(relay::ack_handler::get_pending_messages))
+        .route("/messages/:id/ack", post(relay::ack_handler::ack_message))
         // Forum routes — require auth.
         .route("/forum/posts", post(forum::handlers::create_post))
         .route("/forum/posts", get(forum::handlers::list_posts))

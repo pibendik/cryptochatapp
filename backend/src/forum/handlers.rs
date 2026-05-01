@@ -62,7 +62,7 @@ async fn get_user_group_id(pool: &DbPool, user_id: Uuid) -> Result<Uuid, AppErro
         Some(GroupIdRow { group_id: None }) => {
             Err(AppError::BadRequest("user is not in a group".to_string()))
         }
-        None => Err(AppError::NotFound),
+        None => Err(AppError::NotFound("user not found".into())),
     }
 }
 
@@ -115,6 +115,6 @@ pub async fn resolve_post(
     if resolved {
         Ok((StatusCode::OK, Json(serde_json::json!({ "resolved": true }))))
     } else {
-        Err(AppError::NotFound)
+        Err(AppError::NotFound("forum post not found".into()))
     }
 }

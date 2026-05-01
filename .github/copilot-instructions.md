@@ -63,6 +63,12 @@
 - The resulting signed attestation bundle is stored client-side and sent to the server as an opaque blob.
 - Admin adds the new member's public Key Package to the server directory; the MLS group admin performs a `Welcome` operation.
 
+### Storage Model (Sealed-Envelope)
+**Server stores (PostgreSQL):** public keys, undelivered envelopes (deleted on ACK ~1 min), forum posts (deleted on resolve/30d), auth challenges (5-min TTL).  
+**Server NEVER stores:** message history, read receipts, bio/skills, plaintext content.  
+**Client stores (drift SQLite):** full message history, contacts, profiles, outbound queue.  
+**Design principle:** A compromised server reveals almost nothing — only metadata (who is in which group, message timing, sizes).
+
 ## Security Model
 
 - **Primary adversary is a compromised device.** Keys live in the OS Keychain / Secure Enclave only — never in the app's data directory, SQLCipher, or server. Forward secrecy via MLS + Double Ratchet limits the blast radius of a key compromise.
@@ -87,6 +93,20 @@
 - **Forum and chat are separate data models.** `forum_posts` uses vector-clock ordering; `messages` uses per-conversation sequence numbers. Do not conflate them.
 - **All state machine transitions for ephemeral chats are idempotent.** The server must handle duplicate `CLOSE` or `DELETE` events without corrupting state.
 - **Tests assert properties, not ciphertext values.** "Alice can decrypt what Bob sent to her" is a valid test. "The encrypted blob equals `0xABCD...`" is not — nonces are random.
+
+## Deployment
+
+**Target:** Hetzner CX21 (Germany) or Bahnhof (Sweden) — see `docs/DEPLOYMENT.md` for full runbook.
+
+**Quick start:**
+```bash
+# On the server (apt only — no snap)
+apt install -y docker.io docker-compose-v2 git ufw
+git clone <repo> /opt/cryptochatapp
+cd /opt/cryptochatapp/infra && cp .env.example .env
+# Edit .env: set DOMAIN, POSTGRES_PASSWORD, ALLOWED_ORIGINS
+docker compose up -d
+```
 
 ## Build, Test & Lint
 

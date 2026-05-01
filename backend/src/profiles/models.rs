@@ -47,12 +47,11 @@ impl UserProfile {
     pub async fn update(
         pool: &PgPool,
         user_id: Uuid,
-        bio: String,
-        skills: Vec<String>,
+        display_name: String,
+        // bio and skills intentionally NOT stored server-side — lives on device only
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE users SET bio = $1, skills = $2 WHERE id = $3")
-            .bind(bio)
-            .bind(skills)
+        sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2")
+            .bind(display_name)
             .bind(user_id)
             .execute(pool)
             .await?;

@@ -9,8 +9,8 @@ use thiserror::Error;
 // AppError is used by route handlers.
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("not found")]
-    NotFound,
+    #[error("not found: {0}")]
+    NotFound(String),
 
     #[error("unauthorized: {0}")]
     Unauthorized(String),
@@ -28,7 +28,7 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Database(e) => {

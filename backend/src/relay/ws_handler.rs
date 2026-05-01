@@ -29,7 +29,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use super::message_types::{ClientMessage, PresenceStatus, ServerMessage};
-use crate::{auth::challenge::SessionStore, db::DbPool};
+use crate::{auth::challenge::SessionStore, db::DbPool, push::sender::PushSender};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -69,13 +69,15 @@ where
     ConnectionMap: FromRef<S>,
     OfflineQueue: FromRef<S>,
     DbPool: FromRef<S>,
+    PushSender: FromRef<S>,
 {
     let sessions = SessionStore::from_ref(&state);
     let connections = ConnectionMap::from_ref(&state);
     let offline_queue = OfflineQueue::from_ref(&state);
     let db = DbPool::from_ref(&state);
+    let push_sender = PushSender::from_ref(&state);
 
-    ws.on_upgrade(move |socket| handle_socket(socket, sessions, connections, offline_queue, db))
+    ws.on_upgrade(move |socket| handle_socket(socket, sessions, connections, offline_queue, db, push_sender))
         .into_response()
 }
 
@@ -83,13 +85,14 @@ where
 // Socket driver
 // ---------------------------------------------------------------------------
 
-#[instrument(skip(socket, sessions, connections, offline_queue, db))]
+#[instrument(skip(socket, sessions, connections, offline_queue, db, push_sender))]
 async fn handle_socket(
     socket: WebSocket,
     sessions: SessionStore,
     connections: ConnectionMap,
     offline_queue: OfflineQueue,
     db: DbPool,
+    push_sender: PushSender,
 ) {
     let (mut sink, mut stream) = socket.split();
 
@@ -220,7 +223,7 @@ async fn handle_socket(
     while let Some(Ok(raw)) = stream.next().await {
         match raw {
             Message::Text(text) => {
-                handle_text_message(&text, user_id, sender_group_id, &tx, &connections, &offline_queue, &db).await;
+                handle_text_message(&text, user_id, sender_group_id, &tx, &connections, &offline_queue, &db, &push_sender).await;
             }
             Message::Binary(bytes) => {
                 tracing::warn!(len = bytes.len(), "ignoring unexpected binary frame");
@@ -252,6 +255,7 @@ async fn handle_text_message(
     connections: &ConnectionMap,
     offline_queue: &OfflineQueue,
     db: &DbPool,
+    push_sender: &PushSender,
 ) {
     let client_msg: ClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -267,7 +271,7 @@ async fn handle_text_message(
             send_error(self_tx, "already authenticated");
         }
         ClientMessage::Send { to, payload } => {
-            handle_send(from, sender_group_id, to, payload, db, connections, offline_queue, self_tx).await;
+            handle_send(from, sender_group_id, to, payload, db, connections, offline_queue, self_tx, push_sender).await;
         }
         ClientMessage::Ping => {
             let _ = self_tx.try_send(Message::Text(
@@ -293,6 +297,7 @@ async fn handle_send(
     connections: &ConnectionMap,
     offline_queue: &OfflineQueue,
     self_tx: &PeerTx,
+    push_sender: &PushSender,
 ) {
     match fetch_user_group(db, to).await {
         Err(e) => {
@@ -322,6 +327,10 @@ async fn handle_send(
                     .entry(to)
                     .or_default()
                     .push(json);
+
+                // Fire a silent wake-only push (no content — just wakes the app).
+                // Push failure is non-fatal: message is already in the offline queue.
+                send_silent_push_for_user(db, push_sender, to).await;
             }
         }
 
@@ -341,6 +350,16 @@ async fn handle_send(
             };
             let envelope = ServerMessage::Envelope { from: sender_id, payload };
             let json = serde_json::to_string(&envelope).unwrap_or_default();
+            // Determine which group members are online before sending.
+            let online_ids: Vec<Uuid> = {
+                let guard = connections.read().await;
+                members
+                    .iter()
+                    .filter(|&&mid| mid != sender_id)
+                    .filter(|mid| guard.contains_key(*mid))
+                    .copied()
+                    .collect()
+            };
             // Collect senders while holding read lock, then drop lock before sending.
             let senders: Vec<(Uuid, PeerTx)> = {
                 let guard = connections.read().await;
@@ -356,7 +375,42 @@ async fn handle_send(
                 }
                 // Offline group-message recipients are not queued (direct messages only).
             }
+            // Notify offline group members with a silent push.
+            for mid in members.iter().filter(|&&mid| mid != sender_id && !online_ids.contains(&mid)) {
+                send_silent_push_for_user(db, push_sender, *mid).await;
+            }
         }
+    }
+}
+
+/// Look up device tokens for `user_id` and fire a silent wake push.
+/// Returns immediately; actual sending is spawned in the background.
+async fn send_silent_push_for_user(db: &DbPool, push_sender: &PushSender, user_id: Uuid) {
+    #[derive(sqlx::FromRow)]
+    struct TokenRow {
+        platform: String,
+        token: String,
+    }
+
+    let tokens: Vec<TokenRow> = match sqlx::query_as(
+        r#"SELECT dt.platform, dt.token
+           FROM device_tokens dt
+           JOIN users u ON encode(decode(u.public_key, 'base64'), 'hex') = dt.public_key_hex
+           WHERE u.id = $1"#,
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(user_id = %user_id, "push: DB error looking up device tokens: {e}");
+            return;
+        }
+    };
+
+    for row in tokens {
+        crate::push::sender::fire_and_forget(push_sender.clone(), row.token, row.platform);
     }
 }
 

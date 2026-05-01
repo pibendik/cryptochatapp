@@ -21,9 +21,11 @@ mod db;
 mod ephemeral;
 mod error;
 mod forum;
+mod key_rotation;
 mod mls;
 mod models;
 mod profiles;
+mod push;
 mod relay;
 
 use auth::challenge::{
@@ -32,6 +34,7 @@ use auth::challenge::{
     VerifyRequest, VerifyResponse,
 };
 use models::user::User;
+use push::sender::PushSender;
 use relay::ws_handler::{ws_handler, ConnectionMap, OfflineQueue};
 
 /// Shared application state threaded through all handlers.
@@ -43,6 +46,7 @@ struct AppState {
     connections: ConnectionMap,
     offline_queue: OfflineQueue,
     config: Arc<config::Config>,
+    push_sender: PushSender,
 }
 
 /// Allow the middleware extractor to pull SessionStore out of AppState.
@@ -67,6 +71,12 @@ impl FromRef<AppState> for OfflineQueue {
 impl FromRef<AppState> for db::DbPool {
     fn from_ref(state: &AppState) -> Self {
         state.db.clone()
+    }
+}
+
+impl FromRef<AppState> for PushSender {
+    fn from_ref(state: &AppState) -> Self {
+        state.push_sender.clone()
     }
 }
 
@@ -161,6 +171,7 @@ async fn main() {
         connections: ConnectionMap::default(),
         offline_queue: OfflineQueue::default(),
         config: cfg.clone(),
+        push_sender: PushSender::from_env(),
     };
 
     // Start background cleanup tasks.
@@ -281,6 +292,12 @@ fn build_router(state: AppState) -> Router {
         .route("/mls/key-packages/:group_id", get(mls::handlers::get_key_packages))
         .route("/mls/commits", post(mls::handlers::submit_commit))
         .route("/mls/commits/:group_id", get(mls::handlers::get_commits))
+        // Key rotation and emergency revocation — require auth.
+        .route("/keys/rotate", post(key_rotation::handlers::rotate_key))
+        .route("/keys/emergency-revoke", post(key_rotation::handlers::emergency_revoke))
+        // Push token registration — require auth.
+        .route("/push/register", post(push::handlers::register_token))
+        .route("/push/register", delete(push::handlers::unregister_token))
         // WebSocket relay — auth via first message, not URL query param.
         .route("/ws", get(ws_handler::<AppState>))
         .layer(TraceLayer::new_for_http())

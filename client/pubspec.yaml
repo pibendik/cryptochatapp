@@ -37,6 +37,11 @@ dependencies:
   # HTTP client for REST auth endpoints
   http: ^1.1.0
 
+  # Push notifications — wake-only, zero content (APNs background + FCM data-only)
+  # NOTE: Requires google-services.json (Android) and GoogleService-Info.plist (iOS).
+  # See docs/PUSH_SETUP.md for configuration steps.
+  firebase_messaging: ^14.0.0
+
   # QR code
   qr_flutter: ^4.1.0
   mobile_scanner: ^4.0.0

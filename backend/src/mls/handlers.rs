@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::db::DbPool;
 use crate::error::AppError;
+use crate::mls::delivery::{MlsDeliveryService, MlsMessageType};
 use crate::relay::ws_handler::ConnectionMap;
 
 // ---------------------------------------------------------------------------
@@ -29,8 +30,7 @@ use crate::relay::ws_handler::ConnectionMap;
 
 #[derive(Debug, Deserialize)]
 pub struct UploadKeyPackageRequest {
-    /// Base64-encoded opaque MLS KeyPackage blob.
-    // BLOCKED(mls-phase-4): validate as a real openmls KeyPackage before storing.
+    /// Base64-encoded TLS-serialised MLS KeyPackage blob.
     pub key_package_data: String,
     pub group_id: String,
 }
@@ -101,10 +101,10 @@ struct CommitRow {
 
 /// POST /mls/key-packages — upload a new KeyPackage for a group.
 ///
-/// The caller's public key (looked up from their user record) is used as
-/// `owner_public_key_hex`. An existing KeyPackage for the same
+/// The KeyPackage blob is validated with openmls (signature + lifetime) before
+/// storage.  The caller's public key (looked up from their user record) is used
+/// as `owner_public_key_hex`. An existing KeyPackage for the same
 /// (owner, group_id) pair is replaced.
-// BLOCKED(mls-phase-4): validate the KeyPackage blob with openmls before accepting it.
 pub async fn upload_key_package(
     State(pool): State<DbPool>,
     auth: AuthUser,
@@ -113,6 +113,10 @@ pub async fn upload_key_package(
     let key_package_bytes = STANDARD
         .decode(&body.key_package_data)
         .map_err(|e| AppError::BadRequest(format!("invalid base64 key_package_data: {e}")))?;
+
+    // Validate: TLS-deserialise, verify leaf-node signature, and check lifetime.
+    MlsDeliveryService::validate_key_package(&key_package_bytes)
+        .map_err(|e| AppError::BadRequest(format!("invalid key package: {e}")))?;
 
     // Look up the caller's public key hex (needed for the FK into public_key_allowlist).
     let owner_public_key_hex: String =
@@ -147,7 +151,8 @@ pub async fn upload_key_package(
 ///
 /// Used by a group admin to collect KeyPackages for all members before
 /// constructing a Welcome or Commit message.
-// BLOCKED(mls-phase-4): return proper openmls KeyPackage objects once the crate is integrated.
+// BLOCKED(mls-client-phase-4): client-side MLS state machine — callers use
+// these blobs directly with their local openmls instance to build Welcome/Commit.
 pub async fn get_key_packages(
     State(pool): State<DbPool>,
     _auth: AuthUser,
@@ -171,10 +176,17 @@ pub async fn get_key_packages(
 
 /// POST /mls/commits — submit a new Commit (member add/remove/update).
 ///
-/// Stores the blob and broadcasts `{"type":"mls_commit","groupId":…,"epoch":…,"commitData":…}`
-/// to all currently-connected members of the group via the ConnectionMap.
-// BLOCKED(mls-phase-4): apply the Commit atomically via openmls before broadcasting.
-//   The epoch transition must be atomic: Commit + associated Update/Remove applied together.
+/// The blob is classified by MLS message type:
+/// - `Welcome`        → stored and broadcast; TODO per-recipient routing once
+///                      key-package directory is queryable by KeyPackageRef.
+/// - `PublicMessage`  → stored and broadcast to all group members.
+/// - `PrivateMessage` → stored and broadcast to all group members.
+/// - Unknown/malformed → rejected with 400.
+///
+/// // BLOCKED(mls-client-phase-4): client-side MLS state machine — clients
+/// // apply the Commit via their local openmls instance to advance epoch state.
+/// // The epoch transition (Commit + Update/Remove) must be applied atomically
+/// // by the client; the server only stores the blob.
 pub async fn submit_commit(
     State(pool): State<DbPool>,
     State(connections): State<ConnectionMap>,
@@ -184,6 +196,21 @@ pub async fn submit_commit(
     let commit_bytes = STANDARD
         .decode(&body.commit_data)
         .map_err(|e| AppError::BadRequest(format!("invalid base64 commit_data: {e}")))?;
+
+    // Classify the blob to validate it is a recognised MLS message type.
+    let msg_type = MlsDeliveryService::classify_message(&commit_bytes);
+    if msg_type == MlsMessageType::Unknown {
+        return Err(AppError::BadRequest(
+            "unrecognised or malformed MLS message blob".into(),
+        ));
+    }
+
+    tracing::debug!(
+        group_id = %body.group_id,
+        epoch = body.epoch,
+        msg_type = ?msg_type,
+        "mls message classified for routing"
+    );
 
     let created_by = auth.user_id.to_string();
 
@@ -200,8 +227,12 @@ pub async fn submit_commit(
     .await
     .map_err(AppError::Database)?;
 
-    // Broadcast the commit event to all connected group members.
-    // BLOCKED(mls-phase-4): only broadcast after successful openmls Commit validation.
+    // Broadcast the MLS message to all connected group members.
+    // Welcome messages ideally route only to new-member recipients (by
+    // KeyPackageRef); for now we broadcast to the group as a safe fallback.
+    // TODO(mls-welcome-routing): route Welcome per-recipient using kp_refs.
+    // BLOCKED(mls-client-phase-4): client-side MLS state machine — clients
+    // apply the received message via their local openmls instance.
     broadcast_mls_commit(&pool, &connections, &body.group_id, body.epoch, &body.commit_data).await;
 
     Ok((StatusCode::CREATED, Json(row_to_commit_response(row))))
@@ -210,7 +241,8 @@ pub async fn submit_commit(
 /// GET /mls/commits/:group_id?since_epoch=N — fetch Commit history since epoch N.
 ///
 /// Clients use this to catch up after a reconnect or missed epoch transition.
-// BLOCKED(mls-phase-4): clients will need to apply these Commits via openmls to advance state.
+// BLOCKED(mls-client-phase-4): clients apply these blobs via their local
+// openmls instance to advance group state epoch by epoch.
 pub async fn get_commits(
     State(pool): State<DbPool>,
     _auth: AuthUser,
@@ -263,13 +295,14 @@ fn row_to_commit_response(row: CommitRow) -> CommitResponse {
     }
 }
 
-/// Broadcast a serialised MLS commit event to all currently-connected members
+/// Broadcast a serialised MLS message event to all currently-connected members
 /// of `group_id`.
 ///
 /// Group membership is resolved from the `users` table by parsing `group_id`
 /// as a UUID.  If `group_id` is not a valid UUID (e.g., a future non-UUID MLS
 /// group identifier), the broadcast is silently skipped.
-// BLOCKED(mls-phase-4): replace UUID-based group lookup with MLS tree membership.
+// BLOCKED(mls-client-phase-4): replace UUID-based group lookup with MLS tree
+// membership once clients maintain the ratchet tree locally.
 async fn broadcast_mls_commit(
     pool: &DbPool,
     connections: &ConnectionMap,

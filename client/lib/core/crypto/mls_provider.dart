@@ -4,5 +4,8 @@ import 'mls_service.dart';
 
 /// Provides the active [MlsService] implementation.
 ///
-/// Swap [StubMlsService] for the real openmls-backed service in Phase 4.
+/// Currently uses [StubMlsService] so the app builds without native libraries.
+/// To enable real MLS: change StubMlsService() to RealMlsService(identityKeyHex: ...)
+/// after running: dart run flutter_rust_bridge_codegen generate
+/// in the client/ directory.
 final mlsServiceProvider = Provider<MlsService>((ref) => StubMlsService());

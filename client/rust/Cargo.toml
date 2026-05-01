@@ -1,0 +1,3 @@
+[workspace]
+members = ["mls_bridge"]
+resolver = "2"

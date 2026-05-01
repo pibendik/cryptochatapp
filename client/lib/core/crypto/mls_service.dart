@@ -72,3 +72,78 @@ class StubMlsService implements MlsService {
     // BLOCKED(mls-phase-4): clear plaintextCache for all messages in this group epoch.
   }
 }
+
+/// Real MLS implementation backed by the Rust `mls_bridge` crate via
+/// flutter_rust_bridge.
+///
+/// Each method calls the generated FFI binding.  The bridge serialises the
+/// full openmls group state as a JSON blob; callers are responsible for
+/// persisting that blob in SQLCipher between calls (see [BridgeState] in the
+/// Rust source).
+///
+/// BLOCKED(frb-codegen): Run:
+///   dart run flutter_rust_bridge_codegen generate
+/// in the client/ directory to generate the Dart bindings, then replace the
+/// `throw UnimplementedError(...)` bodies below with the real calls.
+class RealMlsService implements MlsService {
+  /// Serialised [BridgeState] returned by the Rust crate; stored in
+  /// SQLCipher between calls.
+  final Map<String, Uint8List> _groupStates = {}; // ignore: unused_field
+
+  /// Hex-encoded Ed25519 identity public key for this device.
+  final String identityKeyHex;
+
+  RealMlsService({required this.identityKeyHex});
+
+  @override
+  Future<Uint8List> generateKeyPackage(String groupId) async {
+    // BLOCKED(frb-codegen): Run: dart run flutter_rust_bridge_codegen generate
+    // Then replace with:
+    //   final stateBytes = await MlsBridgeImpl.generateKeyPackage(
+    //     groupId: groupId,
+    //     identityKeyHex: identityKeyHex,
+    //   );
+    //   _groupStates[groupId] = Uint8List.fromList(stateBytes);
+    //   // Extract the public KeyPackage TLS bytes from the state JSON
+    //   // for server upload (field: key_package_tls).
+    //   return _extractKeyPackageTls(stateBytes);
+    throw UnimplementedError(
+      'Run flutter_rust_bridge_codegen generate first. '
+      'See client/rust/mls_bridge/src/lib.rs for the Rust API.',
+    );
+  }
+
+  @override
+  Future<void> uploadKeyPackage(String groupId, Uint8List keyPackage) async {
+    // BLOCKED(frb-codegen): HTTP POST to /mls/key-packages with keyPackage bytes.
+    throw UnimplementedError('Run flutter_rust_bridge_codegen generate first.');
+  }
+
+  @override
+  Future<void> processCommit(
+    String groupId,
+    int epoch,
+    Uint8List commitData,
+  ) async {
+    // BLOCKED(frb-codegen): Run: dart run flutter_rust_bridge_codegen generate
+    // Then replace with:
+    //   final currentState = _groupStates[groupId]!;
+    //   final updatedState = await MlsBridgeImpl.processCommit(
+    //     groupState: currentState,
+    //     commitBytes: commitData,
+    //   );
+    //   _groupStates[groupId] = Uint8List.fromList(updatedState);
+    throw UnimplementedError('Run flutter_rust_bridge_codegen generate first.');
+  }
+
+  @override
+  Future<void> onEpochRotation(String groupId, int newEpoch) async {
+    // BLOCKED(frb-codegen): Run: dart run flutter_rust_bridge_codegen generate
+    // Epoch rotation is handled automatically by processCommit via MLS.
+    // This hook can be used to clear application-level plaintext caches.
+    dev.log(
+      '[MLS real] onEpochRotation groupId=$groupId newEpoch=$newEpoch',
+      name: 'MlsService',
+    );
+  }
+}

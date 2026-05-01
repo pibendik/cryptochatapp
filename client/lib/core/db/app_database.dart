@@ -69,6 +69,21 @@ class OutboundQueueTable extends Table {
   IntColumn get attempts => integer().withDefault(const Constant(0))();
 }
 
+/// Persists the serialised MLS group state (BridgeState JSON from mls_bridge)
+/// for each group the local device is a member of.
+///
+/// The [stateData] blob is opaque to the Dart layer — it is read and written
+/// exclusively by [MlsGroupService] via the mls_bridge Rust crate.
+class MlsGroupStateTable extends Table {
+  TextColumn get groupId => text()();
+  BlobColumn get stateData => blob()(); // serialised BridgeState JSON from mls_bridge
+  IntColumn get epoch => integer().withDefault(const Constant(0))();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {groupId};
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 
 @DriftDatabase(tables: [
@@ -77,6 +92,7 @@ class OutboundQueueTable extends Table {
   ForumPostsTable,
   UserProfilesTable,
   OutboundQueueTable,
+  MlsGroupStateTable,
 ])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
@@ -84,7 +100,17 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          if (from < 2) {
+            await m.createTable(mlsGroupStateTable);
+          }
+        },
+      );
 
   // ── Contacts ──
   Future<List<ContactsTableData>> getAllContacts() =>
@@ -168,6 +194,25 @@ class AppDatabase extends _$AppDatabase {
 
   Future<void> deleteOutboundMessage(int id) =>
       (delete(outboundQueueTable)..where((t) => t.id.equals(id))).go();
+
+  // ── MLS group state ──
+  Future<MlsGroupStateTableData?> getMlsState(String groupId) =>
+      (select(mlsGroupStateTable)..where((t) => t.groupId.equals(groupId)))
+          .getSingleOrNull();
+
+  Future<void> saveMlsState(
+    String groupId,
+    Uint8List stateData,
+    int epoch,
+  ) =>
+      into(mlsGroupStateTable).insertOnConflictUpdate(
+        MlsGroupStateTableCompanion(
+          groupId: Value(groupId),
+          stateData: Value(stateData),
+          epoch: Value(epoch),
+          updatedAt: Value(DateTime.now()),
+        ),
+      );
 }
 
 LazyDatabase _openConnection() {

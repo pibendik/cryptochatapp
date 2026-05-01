@@ -24,6 +24,27 @@ abstract class MlsService {
   /// Implementations must invalidate any cached plaintext that was encrypted
   /// under the previous epoch's key material.
   Future<void> onEpochRotation(String groupId, int newEpoch);
+
+  /// Encrypt [plaintext] for the group identified by the opaque [groupState].
+  ///
+  /// Returns `(ciphertext, updatedState)`. The caller MUST persist [updatedState]
+  /// — the MLS ratchet advances after every message.
+  ///
+  /// BLOCKED(frb-codegen): implemented in the `mls_bridge` Rust crate.
+  Future<(Uint8List, Uint8List)> encryptMessage(
+    Uint8List groupState,
+    Uint8List plaintext,
+  );
+
+  /// Decrypt [ciphertext] using the group key encoded in [groupState].
+  ///
+  /// Returns `(plaintext, updatedState)`. The caller MUST persist [updatedState].
+  ///
+  /// BLOCKED(frb-codegen): implemented in the `mls_bridge` Rust crate.
+  Future<(Uint8List, Uint8List)> decryptMessage(
+    Uint8List groupState,
+    Uint8List ciphertext,
+  );
 }
 
 /// Stub implementation of [MlsService].
@@ -70,6 +91,32 @@ class StubMlsService implements MlsService {
       name: 'MlsService',
     );
     // BLOCKED(mls-phase-4): clear plaintextCache for all messages in this group epoch.
+  }
+
+  @override
+  Future<(Uint8List, Uint8List)> encryptMessage(
+    Uint8List groupState,
+    Uint8List plaintext,
+  ) async {
+    dev.log(
+      '[MLS stub] encryptMessage len=${plaintext.length} — no-op, returning plaintext',
+      name: 'MlsService',
+    );
+    // BLOCKED(frb-codegen): no real MLS state — pass through unchanged.
+    return (plaintext, groupState);
+  }
+
+  @override
+  Future<(Uint8List, Uint8List)> decryptMessage(
+    Uint8List groupState,
+    Uint8List ciphertext,
+  ) async {
+    dev.log(
+      '[MLS stub] decryptMessage len=${ciphertext.length} — no-op, returning ciphertext',
+      name: 'MlsService',
+    );
+    // BLOCKED(frb-codegen): no real MLS state — pass through unchanged.
+    return (ciphertext, groupState);
   }
 }
 
@@ -145,5 +192,35 @@ class RealMlsService implements MlsService {
       '[MLS real] onEpochRotation groupId=$groupId newEpoch=$newEpoch',
       name: 'MlsService',
     );
+  }
+
+  @override
+  Future<(Uint8List, Uint8List)> encryptMessage(
+    Uint8List groupState,
+    Uint8List plaintext,
+  ) async {
+    // BLOCKED(frb-codegen): Run: dart run flutter_rust_bridge_codegen generate
+    // Then replace with:
+    //   final result = await MlsBridgeImpl.encryptMessage(
+    //     groupState: groupState,
+    //     plaintext: plaintext,
+    //   );
+    //   return (Uint8List.fromList(result.$1), Uint8List.fromList(result.$2));
+    throw UnimplementedError('Run flutter_rust_bridge_codegen generate first.');
+  }
+
+  @override
+  Future<(Uint8List, Uint8List)> decryptMessage(
+    Uint8List groupState,
+    Uint8List ciphertext,
+  ) async {
+    // BLOCKED(frb-codegen): Run: dart run flutter_rust_bridge_codegen generate
+    // Then replace with:
+    //   final result = await MlsBridgeImpl.decryptMessage(
+    //     groupState: groupState,
+    //     ciphertext: ciphertext,
+    //   );
+    //   return (Uint8List.fromList(result.$1), Uint8List.fromList(result.$2));
+    throw UnimplementedError('Run flutter_rust_bridge_codegen generate first.');
   }
 }

@@ -5,9 +5,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../../core/crypto/crypto_service.dart';
+import '../../core/crypto/mls_group_service.dart';
 import '../../core/db/app_database.dart';
 import '../../core/db/database_provider.dart';
 import '../auth/auth_provider.dart';
+
+/// Well-known group ID used for MLS-encrypting forum post titles.
+/// All group members share this MLS group and can decrypt each other's titles
+/// once the MLS epoch key is established.
+const kForumGroupId = 'forum';
 
 /// Manages forum post operations: watch from local DB, sync from server,
 /// create new posts, and resolve existing posts.
@@ -18,36 +24,50 @@ class ForumNotifier {
     required CryptoService cryptoService,
     required Uint8List? encryptionPublicKey,
     required Uint8List? encryptionPrivateKey,
+    required MlsGroupService mlsGroupService,
   })  : _db = db,
         _sessionToken = sessionToken,
         _cryptoService = cryptoService,
         _encryptionPublicKey = encryptionPublicKey,
-        _encryptionPrivateKey = encryptionPrivateKey;
+        _encryptionPrivateKey = encryptionPrivateKey,
+        _mlsGroupService = mlsGroupService;
 
   final AppDatabase _db;
   final String? _sessionToken;
   final CryptoService _cryptoService;
   final Uint8List? _encryptionPublicKey;
   final Uint8List? _encryptionPrivateKey;
+  final MlsGroupService _mlsGroupService;
 
   /// Live stream of all forum posts, newest first.
   Stream<List<ForumPostsTableData>> watchPosts() => _db.watchForumPosts();
 
   /// Attempts to decrypt a base64-encoded encrypted title.
   ///
-  /// Returns the plaintext title if decryption succeeds (i.e. this is our own
-  /// post encrypted with our public key), or '🔒 [encrypted title]' if
-  /// decryption fails (post from another user whose key we don't have yet).
-  ///
-  // BLOCKED(group-key-phase-4): Once proper group key distribution is
-  // implemented, replace self-decryption with the shared group epoch key so
-  // all members can decrypt any post's title.
+  /// First tries MLS group decryption so all members can read each other's
+  /// titles. Falls back to self-decryption (ECIES with our own private key) if
+  /// MLS is not yet ready. Returns '🔒 [encrypted title]' when both attempts
+  /// fail (e.g. key not available or decryption error).
   Future<String> _decryptTitle(String base64Title) async {
+    final cipherBytes = base64Decode(base64Title);
+
+    // Try MLS group decrypt — succeeds once the forum MLS epoch is established.
+    try {
+      final plainBytes =
+          await _mlsGroupService.decryptForGroup(kForumGroupId, cipherBytes);
+      return utf8.decode(plainBytes);
+    } on MlsStateNotReadyException {
+      // FALLBACK(mls-not-ready): MLS not yet initialised — fall back to
+      // self-decryption so the post author can always read their own titles.
+    } catch (_) {
+      return '🔒 [encrypted title]';
+    }
+
+    // Self-decrypt using our own private key (works only for our own posts).
     final privKey = _encryptionPrivateKey;
     if (privKey == null) return '🔒 [encrypted title]';
 
     try {
-      final cipherBytes = base64Decode(base64Title);
       final plainBytes = await _cryptoService.decrypt(cipherBytes, privKey);
       return utf8.decode(plainBytes);
     } catch (_) {
@@ -101,15 +121,19 @@ class ForumNotifier {
     if (pubKey == null) throw StateError('Encryption keypair not available');
 
     // Encrypt the title client-side so the server only sees ciphertext.
-    // Self-encrypt using our own X25519 public key so we can decrypt our own
-    // posts on this device.
-    // BLOCKED(group-key-phase-4): Replace with shared group epoch key so all
-    // group members can decrypt each other's post titles.
-    final titleBytes = utf8.encode(title);
-    final encryptedTitleBytes = await _cryptoService.encrypt(
-      Uint8List.fromList(titleBytes),
-      pubKey,
-    );
+    // Try MLS group encryption so all members can decrypt each other's titles.
+    // Falls back to self-encryption (ECIES with our own public key) when MLS
+    // is not yet initialised.
+    final titleBytes = Uint8List.fromList(utf8.encode(title));
+    Uint8List encryptedTitleBytes;
+    try {
+      encryptedTitleBytes =
+          await _mlsGroupService.encryptForGroup(kForumGroupId, titleBytes);
+    } on MlsStateNotReadyException {
+      // FALLBACK(mls-not-ready): MLS group not yet initialised — self-encrypt
+      // with our own public key so we can still read our own posts.
+      encryptedTitleBytes = await _cryptoService.encrypt(titleBytes, pubKey);
+    }
     final encryptedTitleB64 = base64Encode(encryptedTitleBytes);
 
     // BLOCKED(phase-3): encrypt payload with group key before posting
@@ -168,11 +192,13 @@ final forumNotifierProvider = Provider<ForumNotifier>((ref) {
   final db = ref.read(appDatabaseProvider);
   final authState = ref.watch(authProvider);
   final crypto = ref.read(cryptoServiceProvider);
+  final mlsGroupService = ref.read(mlsGroupServiceProvider);
   return ForumNotifier(
     db: db,
     sessionToken: authState.sessionToken,
     cryptoService: crypto,
     encryptionPublicKey: authState.encryptionPublicKey,
     encryptionPrivateKey: authState.encryptionPrivateKey,
+    mlsGroupService: mlsGroupService,
   );
 });

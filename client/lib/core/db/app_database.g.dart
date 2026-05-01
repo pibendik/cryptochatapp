@@ -1654,6 +1654,271 @@ class OutboundQueueTableCompanion
   }
 }
 
+class $MlsGroupStateTableTable extends MlsGroupStateTable
+    with TableInfo<$MlsGroupStateTableTable, MlsGroupStateTableData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MlsGroupStateTableTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _groupIdMeta =
+      const VerificationMeta('groupId');
+  @override
+  late final GeneratedColumn<String> groupId = GeneratedColumn<String>(
+      'group_id', aliasedName, false,
+      type: DriftSqlType.string, requiredDuringInsert: true);
+  static const VerificationMeta _stateDataMeta =
+      const VerificationMeta('stateData');
+  @override
+  late final GeneratedColumn<Uint8List> stateData = GeneratedColumn<Uint8List>(
+      'state_data', aliasedName, false,
+      type: DriftSqlType.blob, requiredDuringInsert: true);
+  static const VerificationMeta _epochMeta = const VerificationMeta('epoch');
+  @override
+  late final GeneratedColumn<int> epoch = GeneratedColumn<int>(
+      'epoch', aliasedName, false,
+      type: DriftSqlType.int,
+      requiredDuringInsert: false,
+      defaultValue: const Constant(0));
+  static const VerificationMeta _updatedAtMeta =
+      const VerificationMeta('updatedAt');
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+      'updated_at', aliasedName, false,
+      type: DriftSqlType.dateTime,
+      requiredDuringInsert: false,
+      defaultValue: currentDateAndTime);
+  @override
+  List<GeneratedColumn> get $columns => [groupId, stateData, epoch, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'mls_group_state_table';
+  @override
+  VerificationContext validateIntegrity(
+      Insertable<MlsGroupStateTableData> instance,
+      {bool isInserting = false}) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('group_id')) {
+      context.handle(_groupIdMeta,
+          groupId.isAcceptableOrUnknown(data['group_id']!, _groupIdMeta));
+    } else if (isInserting) {
+      context.missing(_groupIdMeta);
+    }
+    if (data.containsKey('state_data')) {
+      context.handle(_stateDataMeta,
+          stateData.isAcceptableOrUnknown(data['state_data']!, _stateDataMeta));
+    } else if (isInserting) {
+      context.missing(_stateDataMeta);
+    }
+    if (data.containsKey('epoch')) {
+      context.handle(
+          _epochMeta, epoch.isAcceptableOrUnknown(data['epoch']!, _epochMeta));
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(_updatedAtMeta,
+          updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta));
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {groupId};
+  @override
+  MlsGroupStateTableData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MlsGroupStateTableData(
+      groupId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}group_id'])!,
+      stateData: attachedDatabase.typeMapping
+          .read(DriftSqlType.blob, data['${effectivePrefix}state_data'])!,
+      epoch: attachedDatabase.typeMapping
+          .read(DriftSqlType.int, data['${effectivePrefix}epoch'])!,
+      updatedAt: attachedDatabase.typeMapping
+          .read(DriftSqlType.dateTime, data['${effectivePrefix}updated_at'])!,
+    );
+  }
+
+  @override
+  $MlsGroupStateTableTable createAlias(String alias) {
+    return $MlsGroupStateTableTable(attachedDatabase, alias);
+  }
+}
+
+class MlsGroupStateTableData extends DataClass
+    implements Insertable<MlsGroupStateTableData> {
+  final String groupId;
+  final Uint8List stateData;
+  final int epoch;
+  final DateTime updatedAt;
+  const MlsGroupStateTableData(
+      {required this.groupId,
+      required this.stateData,
+      required this.epoch,
+      required this.updatedAt});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['group_id'] = Variable<String>(groupId);
+    map['state_data'] = Variable<Uint8List>(stateData);
+    map['epoch'] = Variable<int>(epoch);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  MlsGroupStateTableCompanion toCompanion(bool nullToAbsent) {
+    return MlsGroupStateTableCompanion(
+      groupId: Value(groupId),
+      stateData: Value(stateData),
+      epoch: Value(epoch),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory MlsGroupStateTableData.fromJson(Map<String, dynamic> json,
+      {ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MlsGroupStateTableData(
+      groupId: serializer.fromJson<String>(json['groupId']),
+      stateData: serializer.fromJson<Uint8List>(json['stateData']),
+      epoch: serializer.fromJson<int>(json['epoch']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'groupId': serializer.toJson<String>(groupId),
+      'stateData': serializer.toJson<Uint8List>(stateData),
+      'epoch': serializer.toJson<int>(epoch),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  MlsGroupStateTableData copyWith(
+          {String? groupId,
+          Uint8List? stateData,
+          int? epoch,
+          DateTime? updatedAt}) =>
+      MlsGroupStateTableData(
+        groupId: groupId ?? this.groupId,
+        stateData: stateData ?? this.stateData,
+        epoch: epoch ?? this.epoch,
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+  @override
+  String toString() {
+    return (StringBuffer('MlsGroupStateTableData(')
+          ..write('groupId: $groupId, ')
+          ..write('stateData: $stateData, ')
+          ..write('epoch: $epoch, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      groupId, $driftBlobEquality.hash(stateData), epoch, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MlsGroupStateTableData &&
+          other.groupId == this.groupId &&
+          $driftBlobEquality.equals(other.stateData, this.stateData) &&
+          other.epoch == this.epoch &&
+          other.updatedAt == this.updatedAt);
+}
+
+class MlsGroupStateTableCompanion
+    extends UpdateCompanion<MlsGroupStateTableData> {
+  final Value<String> groupId;
+  final Value<Uint8List> stateData;
+  final Value<int> epoch;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const MlsGroupStateTableCompanion({
+    this.groupId = const Value.absent(),
+    this.stateData = const Value.absent(),
+    this.epoch = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MlsGroupStateTableCompanion.insert({
+    required String groupId,
+    required Uint8List stateData,
+    this.epoch = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : groupId = Value(groupId),
+        stateData = Value(stateData);
+  static Insertable<MlsGroupStateTableData> custom({
+    Expression<String>? groupId,
+    Expression<Uint8List>? stateData,
+    Expression<int>? epoch,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (groupId != null) 'group_id': groupId,
+      if (stateData != null) 'state_data': stateData,
+      if (epoch != null) 'epoch': epoch,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MlsGroupStateTableCompanion copyWith(
+      {Value<String>? groupId,
+      Value<Uint8List>? stateData,
+      Value<int>? epoch,
+      Value<DateTime>? updatedAt,
+      Value<int>? rowid}) {
+    return MlsGroupStateTableCompanion(
+      groupId: groupId ?? this.groupId,
+      stateData: stateData ?? this.stateData,
+      epoch: epoch ?? this.epoch,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (groupId.present) {
+      map['group_id'] = Variable<String>(groupId.value);
+    }
+    if (stateData.present) {
+      map['state_data'] = Variable<Uint8List>(stateData.value);
+    }
+    if (epoch.present) {
+      map['epoch'] = Variable<int>(epoch.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MlsGroupStateTableCompanion(')
+          ..write('groupId: $groupId, ')
+          ..write('stateData: $stateData, ')
+          ..write('epoch: $epoch, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   late final $ContactsTableTable contactsTable = $ContactsTableTable(this);
@@ -1664,6 +1929,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
       $UserProfilesTableTable(this);
   late final $OutboundQueueTableTable outboundQueueTable =
       $OutboundQueueTableTable(this);
+  late final $MlsGroupStateTableTable mlsGroupStateTable =
+      $MlsGroupStateTableTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -1673,6 +1940,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
         messagesTable,
         forumPostsTable,
         userProfilesTable,
-        outboundQueueTable
+        outboundQueueTable,
+        mlsGroupStateTable
       ];
 }

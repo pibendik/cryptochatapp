@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -48,9 +48,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _send() async {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
-    // BLOCKED(phase-3): encrypt with recipient's X25519 key before sending
-    final bytes = Uint8List.fromList(text.codeUnits);
-    await ref.read(chatProvider).sendMessage(widget.conversationId, bytes);
+    await ref.read(chatProvider).sendMessage(widget.conversationId, text);
     _textController.clear();
   }
 
@@ -129,11 +127,21 @@ class _MessageBubble extends StatelessWidget {
     final textColor =
         isOwn ? cs.onPrimaryContainer : cs.onSecondaryContainer;
 
-    // Show cached plaintext when available; otherwise encrypted placeholder.
-    // BLOCKED(phase-3): wire DartCryptographyService.decrypt() here
-    final displayText = message.plaintextCache != null
-        ? String.fromCharCodes(message.plaintextCache!)
-        : '[encrypted]';
+    // Decode plaintextCache if present.
+    // A null cache means the message has not been decrypted yet.
+    // A cache starting with \x00 is the sentinel written when decryption fails.
+    final cache = message.plaintextCache;
+    final String displayText;
+    if (cache == null) {
+      displayText = '🔒 Encrypted message';
+    } else {
+      final decoded = utf8.decode(cache, allowMalformed: true);
+      if (decoded.startsWith('\x00')) {
+        displayText = '🔒 Decryption failed';
+      } else {
+        displayText = decoded;
+      }
+    }
 
     final t = message.createdAt.toLocal();
     final timeStr =

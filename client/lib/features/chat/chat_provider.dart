@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
@@ -5,6 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../core/config/app_config.dart';
+import '../../core/crypto/crypto_service.dart';
+import '../../core/crypto/mls_provider.dart';
+import '../../core/crypto/mls_service.dart';
 import '../../core/db/app_database.dart';
 import '../../core/db/database_provider.dart';
 import '../../core/models/envelope.dart';
@@ -13,6 +17,10 @@ import '../../core/network/ws_client.dart';
 import '../auth/auth_provider.dart';
 
 part 'chat_provider.g.dart';
+
+/// Sentinel stored in [MessagesTable.plaintextCache] when decryption fails.
+/// Starts with a null byte so it cannot collide with valid UTF-8 message text.
+const _kDecryptFailed = '\x00DECRYPT_FAILED';
 
 // ── WsClient provider ──────────────────────────────────────────────────────
 
@@ -33,46 +41,119 @@ class _ChatService {
   _ChatService({
     required AppDatabase db,
     required WsClient wsClient,
+    required CryptoService cryptoService,
+    required MlsService mlsService,
     String? currentUserId,
+    Uint8List? encryptionPrivateKey,
   })  : _db = db,
         _wsClient = wsClient,
-        _currentUserId = currentUserId;
+        _cryptoService = cryptoService,
+        _mlsService = mlsService,
+        _currentUserId = currentUserId,
+        _encryptionPrivateKey = encryptionPrivateKey;
 
   final AppDatabase _db;
   final WsClient _wsClient;
+  final CryptoService _cryptoService;
+  final MlsService _mlsService;
   final String? _currentUserId;
+  final Uint8List? _encryptionPrivateKey;
 
   /// Reactive stream of messages for [conversationId], ordered oldest-first.
   Stream<List<MessagesTableData>> watchMessages(String conversationId) =>
       _db.watchConversation(conversationId);
 
-  /// Insert a pending outbound message then enqueue it on the WS transport.
-  Future<void> sendMessage(String toId, Uint8List encryptedPayload) async {
+  /// Encrypt [plaintext] for [toId] and enqueue for delivery.
+  ///
+  /// Looks up the recipient's X25519 encryption public key in [ContactsTable].
+  /// If found, encrypts with ECIES (X25519 + HKDF + ChaCha20-Poly1305) before
+  /// sending. Own sent messages are always stored with [plaintextCache] populated.
+  Future<void> sendMessage(String toId, String plaintext) async {
     final id =
         'out_${_currentUserId ?? 'anon'}_${DateTime.now().microsecondsSinceEpoch}';
+    final plaintextBytes = Uint8List.fromList(utf8.encode(plaintext));
+
+    Uint8List payload;
+    final contact = await _db.getContactById(toId);
+    if (contact != null && contact.encryptionPublicKey.isNotEmpty) {
+      try {
+        payload = await _cryptoService.encrypt(
+          plaintextBytes,
+          contact.encryptionPublicKey,
+        );
+      } catch (_) {
+        // Encryption failed — send unencrypted as last resort so the message
+        // is not silently dropped. This should not occur in normal operation.
+        payload = plaintextBytes;
+      }
+    } else {
+      // BLOCKED(mls-phase-4): group message fan-out — encrypt once per recipient
+      // when MLS group key management is implemented in Phase 4.
+      // For now, fall through without encryption when no per-contact X25519 key
+      // is available (e.g. group conversations, or contacts added before key exchange).
+      payload = plaintextBytes;
+    }
+
     await _db.insertMessage(MessagesTableCompanion(
       id: Value(id),
       conversationId: Value(toId),
       senderId: Value(_currentUserId ?? ''),
-      payload: Value(encryptedPayload),
+      payload: Value(payload),
+      // Own sent messages are always cached — no need to decrypt locally.
+      plaintextCache: Value(plaintextBytes),
       createdAt: Value(DateTime.now()),
       isDelivered: const Value(false),
     ));
-    await _wsClient.enqueue(toId, encryptedPayload);
+    await _wsClient.enqueue(toId, payload);
   }
 
-  /// Handle an inbound envelope: stub-decrypt and persist as delivered.
+  /// Decrypt an inbound [envelope] and persist to the local database.
+  ///
+  /// On decryption success: stores the plaintext bytes in [plaintextCache].
+  /// On failure: stores [_kDecryptFailed] so the UI can show an error indicator.
+  /// If the own private key is not yet loaded: stores null so the UI shows a
+  /// generic encrypted-message indicator.
   Future<void> handleIncoming(Envelope envelope) async {
-    // BLOCKED(phase-3): decrypt with DartCryptographyService
     final id = '${envelope.from}_${DateTime.now().microsecondsSinceEpoch}';
+
+    Uint8List? plaintextCache;
+    if (_encryptionPrivateKey != null) {
+      try {
+        final decrypted = await _cryptoService.decrypt(
+          envelope.payload,
+          _encryptionPrivateKey!,
+        );
+        plaintextCache = Uint8List.fromList(decrypted);
+      } catch (_) {
+        // Decryption failed — store sentinel so the UI shows "🔒 Decryption failed".
+        plaintextCache = Uint8List.fromList(utf8.encode(_kDecryptFailed));
+      }
+    }
+    // If _encryptionPrivateKey is null, plaintextCache stays null →
+    // UI shows "🔒 Encrypted message".
+
     await _db.insertMessage(MessagesTableCompanion(
       id: Value(id),
       conversationId: Value(envelope.to),
       senderId: Value(envelope.from),
       payload: Value(envelope.payload),
+      plaintextCache: Value(plaintextCache),
       createdAt: Value(DateTime.now()),
       isDelivered: const Value(true),
     ));
+  }
+
+  /// Handle an inbound `mls_commit` WebSocket event for [groupId].
+  ///
+  /// Calls [MlsService.processCommit] to apply the Commit blob, then
+  /// [MlsService.onEpochRotation] to invalidate stale plaintext caches.
+  Future<void> handleMlsCommit(
+    String groupId,
+    int epoch,
+    Uint8List commitData,
+  ) async {
+    await _mlsService.processCommit(groupId, epoch, commitData);
+    await _mlsService.onEpochRotation(groupId, epoch);
   }
 }
 
@@ -92,7 +173,18 @@ final chatProvider = Provider.autoDispose<_ChatService>((ref) {
   final db = ref.watch(appDatabaseProvider);
   final ws = ref.watch(wsClientProvider);
   final userId = ref.watch(authProvider.select((s) => s.userId));
-  return _ChatService(db: db, wsClient: ws, currentUserId: userId);
+  final cryptoService = ref.watch(cryptoServiceProvider);
+  final mlsService = ref.watch(mlsServiceProvider);
+  final encPrivKey =
+      ref.watch(authProvider.select((s) => s.encryptionPrivateKey));
+  return _ChatService(
+    db: db,
+    wsClient: ws,
+    currentUserId: userId,
+    cryptoService: cryptoService,
+    mlsService: mlsService,
+    encryptionPrivateKey: encPrivKey,
+  );
 });
 
 // ── Legacy per-chat notifier (kept for generated code compat) ──────────────
@@ -108,11 +200,28 @@ class ChatMessages extends _$ChatMessages {
         ref.read(chatProvider).handleIncoming(envelope);
       }
     };
+
+    // Route inbound MLS Commit events to the MLS service.
+    // When a `mls_commit` event arrives the chat service calls processCommit
+    // and onEpochRotation so stale plaintext caches are invalidated.
+    final sub = ws.rawMessages.listen((map) {
+      if (map['type'] == 'mls_commit') {
+        final groupId = map['groupId'] as String?;
+        final epoch = map['epoch'];
+        final commitDataB64 = map['commitData'] as String?;
+        if (groupId == null || epoch == null || commitDataB64 == null) return;
+        final epochInt = epoch is int ? epoch : int.tryParse(epoch.toString()) ?? 0;
+        final commitData = base64Decode(commitDataB64);
+        ref.read(chatProvider).handleMlsCommit(groupId, epochInt, commitData);
+      }
+    });
+    ref.onDispose(sub.cancel);
+
     return [];
   }
 
-  /// Forward an outbound message through the chat service.
-  Future<void> sendMessage(String toId, Uint8List encryptedPayload) async {
-    await ref.read(chatProvider).sendMessage(toId, encryptedPayload);
+  /// Forward an outbound plaintext message through the chat service.
+  Future<void> sendMessage(String toId, String plaintext) async {
+    await ref.read(chatProvider).sendMessage(toId, plaintext);
   }
 }

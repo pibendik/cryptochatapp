@@ -8,7 +8,7 @@ pub struct ForumPost {
     pub id: Uuid,
     pub author_id: Uuid,
     pub group_id: Uuid,     // posts are scoped to the author's group
-    pub title: String,      // plaintext title — short, not sensitive
+    pub title: Vec<u8>,     // ECIES ciphertext — encrypted client-side before upload
     pub payload: Vec<u8>,   // encrypted body — ALWAYS ciphertext
     pub resolved: bool,
     pub created_at: DateTime<Utc>,
@@ -19,7 +19,7 @@ impl ForumPost {
         pool: &PgPool,
         author_id: Uuid,
         group_id: Uuid,
-        title: String,
+        title: Vec<u8>,
         payload: Vec<u8>,
     ) -> Result<Self, sqlx::Error> {
         sqlx::query_as::<_, ForumPost>(

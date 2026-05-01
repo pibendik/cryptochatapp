@@ -15,10 +15,13 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::instrument;
 
 mod auth;
+mod admin;
 mod config;
 mod db;
+mod ephemeral;
 mod error;
 mod forum;
+mod mls;
 mod models;
 mod profiles;
 mod relay;
@@ -100,6 +103,29 @@ async fn main() {
 
     tracing::info!("database migrations applied");
 
+    // Bootstrap admin key: if BOOTSTRAP_ADMIN_KEY is set and the allowlist is
+    // empty, insert it automatically so the first admin can reach the API.
+    if let Ok(bootstrap_key) = std::env::var("BOOTSTRAP_ADMIN_KEY") {
+        if !bootstrap_key.is_empty() {
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM public_key_allowlist")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(0);
+            if count == 0 {
+                let _ = sqlx::query(
+                    "INSERT INTO public_key_allowlist (public_key_hex, added_by, label)
+                     VALUES ($1, 'bootstrap', 'Bootstrap Admin')
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(&bootstrap_key)
+                .execute(&pool)
+                .await;
+                tracing::info!("bootstrap admin key inserted into allowlist");
+            }
+        }
+    }
+
     let state = AppState {
         db: pool,
         challenges: ChallengeStore::new(),
@@ -144,6 +170,21 @@ async fn main() {
         });
     }
 
+    // Cleanup task: delete expired ephemeral sessions hourly.
+    {
+        let pool = state.db.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                let _ = sqlx::query(
+                    "DELETE FROM ephemeral_sessions WHERE expires_at < NOW()"
+                )
+                .execute(&pool)
+                .await;
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let addr: SocketAddr = cfg
@@ -175,16 +216,21 @@ fn build_router(state: AppState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     use axum::routing::get;
+    use axum::routing::delete;
     Router::new()
         // Health check — no auth required.
         .route("/health", get(health_handler))
         // Auth routes.
         .route("/auth/challenge", post(challenge_handler))
         .route("/auth/verify", post(verify_handler))
+        // Admin allowlist routes — protected by AdminAuth extractor.
+        .route("/admin/allowlist", get(admin::handlers::list_allowlist))
+        .route("/admin/allowlist", post(admin::handlers::add_to_allowlist))
+        .route("/admin/allowlist/:key_hex", delete(admin::handlers::remove_from_allowlist))
         // Profile routes.
         .route("/users/me/profile", get(profiles::handlers::get_own_profile))
         .route("/users/me/profile", put(profiles::handlers::update_profile))
@@ -197,6 +243,16 @@ fn build_router(state: AppState) -> Router {
         .route("/forum/posts", post(forum::handlers::create_post))
         .route("/forum/posts", get(forum::handlers::list_posts))
         .route("/forum/posts/:id/resolve", patch(forum::handlers::resolve_post))
+        // Ephemeral help-request chat routes — require auth.
+        .route("/ephemeral/raise", post(ephemeral::handlers::raise_flag))
+        .route("/ephemeral/active", get(ephemeral::handlers::list_active))
+        .route("/ephemeral/:id/join", post(ephemeral::handlers::join_session))
+        .route("/ephemeral/:id/close", post(ephemeral::handlers::close_session))
+        // MLS key rotation routes — require auth.
+        .route("/mls/key-packages", post(mls::handlers::upload_key_package))
+        .route("/mls/key-packages/:group_id", get(mls::handlers::get_key_packages))
+        .route("/mls/commits", post(mls::handlers::submit_commit))
+        .route("/mls/commits/:group_id", get(mls::handlers::get_commits))
         // WebSocket relay — auth via first message, not URL query param.
         .route("/ws", get(ws_handler::<AppState>))
         .layer(TraceLayer::new_for_http())
@@ -239,7 +295,32 @@ async fn verify_handler(
         }
     };
 
-    // 2. Upsert the user in the database.
+    // 2. Check that the public key is in the allowlist.
+    match sqlx::query("SELECT 1 FROM public_key_allowlist WHERE public_key_hex = $1")
+        .bind(&public_key)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            tracing::warn!(public_key = %public_key, "authentication rejected: key not in allowlist");
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "public key not in allowlist" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("allowlist DB check failed: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "database error" })),
+            )
+                .into_response();
+        }
+    }
+
+    // 3. Upsert the user in the database.
     let user = match User::upsert(
         &state.db,
         &public_key,
@@ -259,7 +340,7 @@ async fn verify_handler(
         }
     };
 
-    // 3. Mint a random 32-byte session token and register it.
+    // 4. Mint a random 32-byte session token and register it.
     let mut token_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut token_bytes);
     let session_token = hex::encode(token_bytes);

@@ -6,6 +6,7 @@ import 'features/auth/auth_provider.dart';
 import 'features/auth/screens/onboarding_screen.dart';
 import 'features/chat/screens/chat_list_screen.dart';
 import 'features/chat/screens/chat_screen.dart';
+import 'features/ephemeral/screens/ephemeral_chat_screen.dart';
 import 'features/forum/screens/forum_screen.dart';
 import 'features/profile/screens/members_screen.dart';
 import 'features/profile/screens/profile_screen.dart';
@@ -39,6 +40,12 @@ GoRouter router(Ref ref) {
         path: '/chat/:conversationId',
         builder: (context, state) => ChatScreen(
           conversationId: state.pathParameters['conversationId']!,
+        ),
+      ),
+      GoRoute(
+        path: '/ephemeral/:sessionId',
+        builder: (context, state) => EphemeralChatScreen(
+          sessionId: state.pathParameters['sessionId']!,
         ),
       ),
       GoRoute(

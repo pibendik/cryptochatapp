@@ -6,7 +6,7 @@ part of 'chat_provider.dart';
 // RiverpodGenerator
 // **************************************************************************
 
-String _$wsClientHash() => r'86c95a8e90bab7f9621dcdf0c2872d233c959fa4';
+String _$wsClientHash() => r'14384db3a93f03460aa8aa3d262fe1e75ccba3aa';
 
 /// See also [wsClient].
 @ProviderFor(wsClient)
@@ -20,7 +20,7 @@ final wsClientProvider = AutoDisposeProvider<WsClient>.internal(
 );
 
 typedef WsClientRef = AutoDisposeProviderRef<WsClient>;
-String _$chatMessagesHash() => r'710ed768f75fa605879c874a6671f9e3c26e77d3';
+String _$chatMessagesHash() => r'f0a6488cfe0642211f5899b69314ef26fd062b26';
 
 /// Copied from Dart SDK
 class _SystemHash {

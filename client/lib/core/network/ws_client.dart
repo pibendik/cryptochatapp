@@ -3,8 +3,10 @@ import 'dart:collection';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../db/app_database.dart';
 import '../models/envelope.dart';
 import '../storage/secure_storage_service.dart';
 
@@ -12,13 +14,17 @@ enum WsConnectionState { disconnected, connecting, connected }
 
 typedef EnvelopeHandler = void Function(Envelope envelope);
 
-// BLOCKED(phase-3): persist outbound queue to drift OutboundQueueTable for crash-safety
 class _OutboundMessage {
+  final int? dbId; // row id in OutboundQueueTable; null if not yet persisted
   final String toId; // recipient user or group UUID
   final Uint8List payload; // encrypted envelope
   final DateTime queuedAt;
-  _OutboundMessage({required this.toId, required this.payload})
-      : queuedAt = DateTime.now();
+  _OutboundMessage({
+    this.dbId,
+    required this.toId,
+    required this.payload,
+    DateTime? queuedAt,
+  }) : queuedAt = queuedAt ?? DateTime.now();
 }
 
 /// WebSocket client with automatic exponential-backoff reconnection.
@@ -32,12 +38,15 @@ class WsClient {
   WsClient({
     required this.uri,
     required SecureStorageService secureStorage,
+    required AppDatabase db,
     this.maxReconnectDelay = const Duration(seconds: 32),
-  }) : _secureStorage = secureStorage;
+  })  : _secureStorage = secureStorage,
+        _db = db;
 
   final Uri uri;
   final Duration maxReconnectDelay;
   final SecureStorageService _secureStorage;
+  final AppDatabase _db;
 
   EnvelopeHandler? onEnvelope;
 
@@ -54,7 +63,8 @@ class WsClient {
       StreamController<WsConnectionState>.broadcast();
   Stream<WsConnectionState> get stateStream => _stateController.stream;
 
-  // BLOCKED(phase-3): replace with drift OutboundQueueTable for persistence across app restarts
+  // In-memory queue mirrors the OutboundQueueTable rows for fast FIFO access.
+  // On app restart, rows are reloaded from the DB in connect().
   final Queue<_OutboundMessage> _outboundQueue = Queue();
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -72,20 +82,33 @@ class WsClient {
 
   Future<void> connect() async {
     if (_state != WsConnectionState.disconnected) return;
+    await _loadPersistedQueue();
     await _connect();
   }
 
   /// Enqueue [payload] (serialised encrypted envelope) for delivery to [toId].
   ///
+  /// Persists to [OutboundQueueTable] first so the message survives app restarts.
   /// Always enqueues — even if connected — to maintain FIFO ordering.
   /// If the queue exceeds 500 messages the oldest message is dropped.
-  void enqueue(String toId, Uint8List payload) {
+  Future<void> enqueue(String toId, Uint8List payload) async {
     if (_outboundQueue.length >= 500) {
-      _outboundQueue.removeFirst(); // drop oldest, FIFO
+      final dropped = _outboundQueue.removeFirst();
+      if (dropped.dbId != null) {
+        unawaited(_db.deleteOutboundMessage(dropped.dbId!));
+      }
       // ignore: avoid_print
       print('WARNING: Outbound queue full, dropping oldest message');
     }
-    _outboundQueue.addLast(_OutboundMessage(toId: toId, payload: payload));
+    final now = DateTime.now();
+    final dbId = await _db.enqueueOutbound(OutboundQueueTableCompanion(
+      toId: Value(toId),
+      payload: Value(payload),
+      queuedAt: Value(now),
+    ));
+    _outboundQueue.addLast(
+      _OutboundMessage(dbId: dbId, toId: toId, payload: payload, queuedAt: now),
+    );
     _drainQueue();
   }
 
@@ -144,11 +167,29 @@ class WsClient {
         });
         _channel!.sink.add(envelope);
         _outboundQueue.removeFirst();
+        if (msg.dbId != null) {
+          unawaited(_db.deleteOutboundMessage(msg.dbId!));
+        }
       } catch (e) {
         // Send failed — stop draining, message stays at front of queue.
         // Will retry on next _drainQueue() call after reconnect.
         break;
       }
+    }
+  }
+
+  /// Loads any rows persisted in [OutboundQueueTable] into the front of the
+  /// in-memory queue so they are retried before any newly-enqueued messages.
+  /// Called once by [connect()] on the first connection attempt after app start.
+  Future<void> _loadPersistedQueue() async {
+    final rows = await _db.getPendingOutbound();
+    for (final row in rows.reversed) {
+      _outboundQueue.addFirst(_OutboundMessage(
+        dbId: row.id,
+        toId: row.toId,
+        payload: row.payload,
+        queuedAt: row.queuedAt,
+      ));
     }
   }
 

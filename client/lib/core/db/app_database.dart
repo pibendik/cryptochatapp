@@ -103,12 +103,30 @@ class AppDatabase extends _$AppDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.createdAt)]))
           .watch();
 
+  /// Returns a stream of the single most-recent message in [conversationId],
+  /// or null when the conversation has no messages yet.
+  Stream<MessagesTableData?> watchLastMessage(String conversationId) =>
+      (select(messagesTable)
+            ..where((t) => t.conversationId.equals(conversationId))
+            ..orderBy([(t) => OrderingTerm.desc(t.createdAt)])
+            ..limit(1))
+          .watchSingleOrNull();
+
   Future<void> insertMessage(MessagesTableCompanion msg) =>
       into(messagesTable).insertOnConflictUpdate(msg);
 
   Future<void> updatePlaintextCache(String id, Uint8List plaintext) =>
       (update(messagesTable)..where((t) => t.id.equals(id)))
           .write(MessagesTableCompanion(plaintextCache: Value(plaintext)));
+
+  /// Clears [MessagesTable.plaintextCache] for every message in [groupId].
+  ///
+  /// Called by MlsService.onEpochRotation — must be atomic with epoch key rotation.
+  /// After an MLS epoch transition the previous epoch's key material is gone, so
+  /// any cached plaintext is no longer verifiable and must be re-decrypted.
+  Future<void> clearPlaintextCacheForGroup(String groupId) =>
+      (update(messagesTable)..where((m) => m.conversationId.equals(groupId)))
+          .write(const MessagesTableCompanion(plaintextCache: Value(null)));
 
   // ── Forum posts ──
   Stream<List<ForumPostsTableData>> watchForumPosts() =>
@@ -141,7 +159,9 @@ class AppDatabase extends _$AppDatabase {
 
   // ── Outbound queue ──
   Future<List<OutboundQueueTableData>> getPendingOutbound() =>
-      select(outboundQueueTable).get();
+      (select(outboundQueueTable)
+            ..orderBy([(t) => OrderingTerm.asc(t.queuedAt)]))
+          .get();
 
   Future<int> enqueueOutbound(OutboundQueueTableCompanion msg) =>
       into(outboundQueueTable).insert(msg);

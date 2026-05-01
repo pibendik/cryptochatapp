@@ -16,7 +16,7 @@ use super::models::ForumPost;
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePostRequest {
-    pub title: String,
+    pub title: String,   // base64-encoded ECIES ciphertext
     pub payload: String, // base64-encoded ciphertext
 }
 
@@ -25,7 +25,7 @@ pub struct ForumPostResponse {
     pub id: Uuid,
     pub author_id: Uuid,
     pub group_id: Uuid,
-    pub title: String,
+    pub title: String,   // base64-encoded ECIES ciphertext
     pub payload: String, // base64-encoded ciphertext
     pub resolved: bool,
     pub created_at: DateTime<Utc>,
@@ -37,7 +37,7 @@ impl From<ForumPost> for ForumPostResponse {
             id: post.id,
             author_id: post.author_id,
             group_id: post.group_id,
-            title: post.title,
+            title: STANDARD.encode(&post.title),
             payload: STANDARD.encode(&post.payload),
             resolved: post.resolved,
             created_at: post.created_at,
@@ -78,7 +78,11 @@ pub async fn create_post(
         .decode(&body.payload)
         .map_err(|e| AppError::BadRequest(format!("invalid base64 payload: {e}")))?;
 
-    let post = ForumPost::create(&pool, auth.user_id, group_id, body.title, payload)
+    let title = STANDARD
+        .decode(&body.title)
+        .map_err(|e| AppError::BadRequest(format!("invalid base64 title: {e}")))?;
+
+    let post = ForumPost::create(&pool, auth.user_id, group_id, title, payload)
         .await
         .map_err(AppError::Database)?;
 

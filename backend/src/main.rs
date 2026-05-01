@@ -126,6 +126,34 @@ async fn main() {
         }
     }
 
+    // Production safety guard: fail hard if we are in production with an empty
+    // allowlist and no bootstrap key — a fail-open that could expose the admin API.
+    let app_env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+    let bootstrap_key = std::env::var("BOOTSTRAP_ADMIN_KEY").ok();
+    if app_env == "production" && bootstrap_key.filter(|k| !k.is_empty()).is_none() {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM public_key_allowlist")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or((0,));
+        if count.0 == 0 {
+            eprintln!("FATAL: APP_ENV=production but BOOTSTRAP_ADMIN_KEY is not set and allowlist is empty.");
+            eprintln!("Set BOOTSTRAP_ADMIN_KEY to your Ed25519 public key hex, or add keys to the allowlist first.");
+            std::process::exit(1);
+        }
+    }
+
+    // Startup recovery: log any ephemeral sessions that were RAISED/ACTIVE when
+    // the server last shut down. They remain visible via GET /ephemeral/active.
+    {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ephemeral_sessions WHERE state != 'CLOSED' AND expires_at > NOW()",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
+        tracing::info!(count, "ephemeral sessions recovered from database on startup");
+    }
+
     let state = AppState {
         db: pool,
         challenges: ChallengeStore::new(),
@@ -170,14 +198,14 @@ async fn main() {
         });
     }
 
-    // Cleanup task: delete expired ephemeral sessions hourly.
+    // Cleanup task: delete expired or CLOSED ephemeral sessions hourly.
     {
         let pool = state.db.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
                 let _ = sqlx::query(
-                    "DELETE FROM ephemeral_sessions WHERE expires_at < NOW()"
+                    "DELETE FROM ephemeral_sessions WHERE expires_at < NOW() OR state = 'CLOSED'"
                 )
                 .execute(&pool)
                 .await;

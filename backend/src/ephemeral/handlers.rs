@@ -260,49 +260,55 @@ pub async fn join_session(
 
 /// POST /ephemeral/:id/close
 ///
-/// Closes the session. Idempotent — if the session no longer exists, returns 200.
-/// Broadcasts `{type:"ephemeral_deleted", sessionId}` to all current participants,
-/// then deletes the session row (CASCADE removes participants).
+/// Closes the session. Idempotent — if the session is already CLOSED or does not
+/// exist, returns 200. Persists state=CLOSED to the DB first (so the transition
+/// survives a crash), then broadcasts `{type:"ephemeral_deleted", sessionId}` to
+/// all current participants.
 pub async fn close_session(
     State(pool): State<DbPool>,
     State(connections): State<ConnectionMap>,
     auth: AuthUser,
     Path(session_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Check the caller is authenticated (auth extractor handles this).
     let _ = auth.user_id;
 
-    // Fetch current participants before deletion (for broadcast).
-    let participant_ids = get_session_participants(&pool, session_id).await?;
-
-    // If the session no longer exists, this is a no-op.
-    let exists: Option<bool> = sqlx::query_scalar(
-        "SELECT TRUE FROM ephemeral_sessions WHERE id = $1",
+    // Idempotent check: if the session doesn't exist or is already CLOSED, return 200.
+    let state_row: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM ephemeral_sessions WHERE id = $1",
     )
     .bind(session_id)
     .fetch_optional(&pool)
     .await
     .map_err(AppError::Database)?;
 
-    if exists.is_none() {
-        // Already closed/deleted — idempotent 200.
-        return Ok((StatusCode::OK, Json(json!({ "closed": true, "idempotent": true }))));
+    match state_row.as_deref() {
+        None | Some("CLOSED") => {
+            return Ok((StatusCode::OK, Json(json!({ "closed": true, "idempotent": true }))));
+        }
+        _ => {}
     }
 
-    // Broadcast before deletion so participants learn about the close.
+    // Fetch participants while the session is still RAISED/ACTIVE.
+    let participant_ids = get_session_participants(&pool, session_id).await?;
+
+    // Persist CLOSED state before broadcasting so the transition is durable.
+    sqlx::query(
+        "UPDATE ephemeral_sessions
+         SET state = 'CLOSED', closed_at = NOW()
+         WHERE id = $1 AND state != 'CLOSED'",
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Broadcast deletion event to all participants that were online.
     let notification = json!({
         "type": "ephemeral_deleted",
         "sessionId": session_id,
     })
     .to_string();
     broadcast_to_users(&connections, &participant_ids, &notification).await;
-
-    // Delete the session (CASCADE removes ephemeral_participants).
-    sqlx::query("DELETE FROM ephemeral_sessions WHERE id = $1")
-        .bind(session_id)
-        .execute(&pool)
-        .await
-        .map_err(AppError::Database)?;
 
     Ok((StatusCode::OK, Json(json!({ "closed": true }))))
 }

@@ -1,12 +1,12 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../core/config/app_config.dart';
-import '../../core/crypto/crypto_service.dart';
+import '../../core/crypto/dart_cryptography_service.dart';
 import '../../core/crypto/mls_provider.dart';
 import '../../core/crypto/mls_service.dart';
 import '../../core/db/app_database.dart';
@@ -17,6 +17,29 @@ import '../../core/network/ws_client.dart';
 import '../auth/auth_provider.dart';
 
 part 'chat_provider.g.dart';
+
+// ── Isolate-safe encrypt/decrypt helpers ──────────────────────────────────
+// Top-level functions required by compute() — must be outside any class.
+// DartCryptographyService is pure Dart (no platform channels), so it is
+// safe to instantiate inside a background isolate.
+
+Future<Uint8List> _encryptMessage(
+  ({Uint8List plaintext, Uint8List recipientKey}) args,
+) async {
+  final crypto = DartCryptographyService();
+  return crypto.encrypt(args.plaintext, args.recipientKey);
+}
+
+Future<Uint8List?> _decryptMessage(
+  ({Uint8List ciphertext, Uint8List senderKey}) args,
+) async {
+  try {
+    final crypto = DartCryptographyService();
+    return await crypto.decrypt(args.ciphertext, args.senderKey);
+  } catch (_) {
+    return null;
+  }
+}
 
 /// Sentinel stored in [MessagesTable.plaintextCache] when decryption fails.
 /// Starts with a null byte so it cannot collide with valid UTF-8 message text.
@@ -41,20 +64,17 @@ class _ChatService {
   _ChatService({
     required AppDatabase db,
     required WsClient wsClient,
-    required CryptoService cryptoService,
     required MlsService mlsService,
     String? currentUserId,
     Uint8List? encryptionPrivateKey,
   })  : _db = db,
         _wsClient = wsClient,
-        _cryptoService = cryptoService,
         _mlsService = mlsService,
         _currentUserId = currentUserId,
         _encryptionPrivateKey = encryptionPrivateKey;
 
   final AppDatabase _db;
   final WsClient _wsClient;
-  final CryptoService _cryptoService;
   final MlsService _mlsService;
   final String? _currentUserId;
   final Uint8List? _encryptionPrivateKey;
@@ -77,9 +97,9 @@ class _ChatService {
     final contact = await _db.getContactById(toId);
     if (contact != null && contact.encryptionPublicKey.isNotEmpty) {
       try {
-        payload = await _cryptoService.encrypt(
-          plaintextBytes,
-          contact.encryptionPublicKey,
+        payload = await compute(
+          _encryptMessage,
+          (plaintext: plaintextBytes, recipientKey: contact.encryptionPublicKey),
         );
       } catch (_) {
         // Encryption failed — send unencrypted as last resort so the message
@@ -118,16 +138,12 @@ class _ChatService {
 
     Uint8List? plaintextCache;
     if (_encryptionPrivateKey != null) {
-      try {
-        final decrypted = await _cryptoService.decrypt(
-          envelope.payload,
-          _encryptionPrivateKey!,
-        );
-        plaintextCache = Uint8List.fromList(decrypted);
-      } catch (_) {
-        // Decryption failed — store sentinel so the UI shows "🔒 Decryption failed".
-        plaintextCache = Uint8List.fromList(utf8.encode(_kDecryptFailed));
-      }
+      final decrypted = await compute(
+        _decryptMessage,
+        (ciphertext: envelope.payload, senderKey: _encryptionPrivateKey!),
+      );
+      plaintextCache = decrypted ??
+          Uint8List.fromList(utf8.encode(_kDecryptFailed));
     }
     // If _encryptionPrivateKey is null, plaintextCache stays null →
     // UI shows "🔒 Encrypted message".
@@ -173,7 +189,6 @@ final chatProvider = Provider.autoDispose<_ChatService>((ref) {
   final db = ref.watch(appDatabaseProvider);
   final ws = ref.watch(wsClientProvider);
   final userId = ref.watch(authProvider.select((s) => s.userId));
-  final cryptoService = ref.watch(cryptoServiceProvider);
   final mlsService = ref.watch(mlsServiceProvider);
   final encPrivKey =
       ref.watch(authProvider.select((s) => s.encryptionPrivateKey));
@@ -181,7 +196,6 @@ final chatProvider = Provider.autoDispose<_ChatService>((ref) {
     db: db,
     wsClient: ws,
     currentUserId: userId,
-    cryptoService: cryptoService,
     mlsService: mlsService,
     encryptionPrivateKey: encPrivKey,
   );

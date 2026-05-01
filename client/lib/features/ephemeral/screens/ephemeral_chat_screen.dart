@@ -50,13 +50,17 @@ class _EphemeralChatScreenState extends ConsumerState<EphemeralChatScreen> {
     _textController.clear();
   }
 
-  Future<void> _endSession() async {
+  Future<void> _confirmEndSession(
+    BuildContext context,
+    WidgetRef ref,
+    String sessionId,
+  ) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('End session?'),
+        title: const Text('End help session?'),
         content: const Text(
-          'This will close the help session for everyone. Messages will be deleted.',
+          'This will close the session and permanently delete all messages for everyone. This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -64,8 +68,9 @@ class _EphemeralChatScreenState extends ConsumerState<EphemeralChatScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('End session'),
+            child: const Text('End Session'),
           ),
         ],
       ),
@@ -74,12 +79,10 @@ class _EphemeralChatScreenState extends ConsumerState<EphemeralChatScreen> {
 
     setState(() => _closing = true);
     try {
-      await ref
-          .read(ephemeralProvider.notifier)
-          .closeSession(widget.sessionId);
-      if (mounted) context.go('/');
+      await ref.read(ephemeralProvider.notifier).closeSession(sessionId);
+      if (context.mounted) context.go('/');
     } catch (e) {
-      if (mounted) {
+      if (context.mounted) {
         setState(() => _closing = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to end session: $e')),
@@ -115,7 +118,9 @@ class _EphemeralChatScreenState extends ConsumerState<EphemeralChatScreen> {
         foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
         actions: [
           TextButton.icon(
-            onPressed: _closing ? null : _endSession,
+            onPressed: _closing
+                ? null
+                : () => _confirmEndSession(context, ref, widget.sessionId),
             icon: const Icon(Icons.stop_circle_outlined),
             label: const Text('End session'),
             style: TextButton.styleFrom(

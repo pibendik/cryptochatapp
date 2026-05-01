@@ -54,7 +54,7 @@ final cryptoServiceProvider = AutoDisposeProvider<CryptoService>.internal(
 );
 
 typedef CryptoServiceRef = AutoDisposeProviderRef<CryptoService>;
-String _$authHash() => r'470aaff928514c48643111c206c74f9f12ad3cf3';
+String _$authHash() => r'67fc82c194f063dbf72087bd71f90db03507575f';
 
 /// See also [Auth].
 @ProviderFor(Auth)

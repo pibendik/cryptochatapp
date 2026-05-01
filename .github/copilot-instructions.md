@@ -131,6 +131,25 @@ cd infra && docker compose up -d
 cd infra && docker compose logs -f backend
 ```
 
+## Completed Phases
+
+| Phase | Status | Summary |
+|-------|--------|---------|
+| Phase 0 | ✅ Complete | Scaffolding, infra, Docker Compose, CI pipeline |
+| Phase 1 | ✅ Complete | WebSocket auth, MLS scaffold, Double Ratchet 1:1 DMs, basic chat UI |
+| Phase 2 | ✅ Complete | Forum board, user profiles, presence system |
+| Phase 3 | ✅ Complete | Ephemeral chat state machine (`backend/src/ephemeral/`), admin module (`backend/src/admin/`), MLS scaffolding in client (`mls_service.dart`, `mls_provider.dart`), `crypto_service.dart` abstraction |
+
+## Phase 4 BLOCKED Items
+
+The following items are deferred to Phase 4. Search for the comment tag to find all call sites.
+
+| Tag | Description |
+|-----|-------------|
+| `// BLOCKED(mls-phase-4)` | Real `openmls` epoch rotation not yet wired; stub returns ECIES ciphertext |
+| `// BLOCKED(group-key)` | Forum titles and group messages use self-encrypt; shared MLS epoch key not yet distributed |
+| `// BLOCKED(consensus-phase-4)` | Admin actions (`/ephemeral/raise`, member add/remove, allowlist) not yet gated by 2/3 vote |
+
 ## Project Structure
 
 ```
@@ -140,21 +159,41 @@ cryptochatapp/
 │   │   ├── main.rs             # Tokio runtime entry point
 │   │   ├── ws/                 # WebSocket handlers (connect, relay, presence)
 │   │   ├── auth/               # Ed25519 challenge-response + JWT issuance
-│   │   ├── routes/             # HTTP REST routes (key packages, profile, forum)
-│   │   ├── db/                 # PostgreSQL models and migrations (sqlx)
-│   │   └── crypto/             # openmls + sodiumoxide wrappers
+│   │   ├── mls/                # MLS KeyPackage directory + epoch handlers (BLOCKED: openmls not yet wired)
+│   │   ├── admin/              # Admin actions: member add/remove, allowlist (BLOCKED: consensus not yet enforced)
+│   │   ├── ephemeral/          # Ephemeral chat state machine (BLOCKED: consensus gate)
+│   │   ├── forum/              # Forum post routes (BLOCKED: group-key distribution)
+│   │   ├── profiles/           # Encrypted profile routes
+│   │   ├── relay/              # Message relay / WebSocket routing
+│   │   ├── models/             # Shared Rust model types
+│   │   └── db/                 # PostgreSQL models and migrations (sqlx)
+│   │       └── migrations/
 │   ├── Cargo.toml
 │   └── config.dev.toml
 │
 ├── client/                     # Flutter frontend (all platforms)
 │   ├── lib/
-│   │   ├── screens/            # Navigation screens (Chat, Forum, Profile, etc.)
-│   │   ├── widgets/            # Reusable adaptive widgets
-│   │   ├── crypto/             # Dart crypto bindings (FFI → Rust or dart:ffi)
-│   │   ├── keychain/           # Platform keychain abstraction (iOS/Android/desktop/web)
-│   │   ├── db/                 # SQLCipher schema + migrations + query helpers
-│   │   ├── ws/                 # WebSocket client (reconnect, message queue, gap detection)
-│   │   └── state/              # App state (Riverpod / Bloc)
+│   │   ├── core/
+│   │   │   ├── config/         # App configuration constants
+│   │   │   ├── crypto/         # Crypto abstraction layer
+│   │   │   │   ├── crypto_service.dart          # Unified crypto interface
+│   │   │   │   ├── dart_cryptography_service.dart
+│   │   │   │   ├── sodium_crypto_service.dart
+│   │   │   │   ├── mls_service.dart             # MLS stub (BLOCKED: FFI not wired)
+│   │   │   │   └── mls_provider.dart            # Riverpod MLS provider
+│   │   │   ├── db/             # Drift SQLite schema + migrations
+│   │   │   ├── models/         # Shared Dart model types
+│   │   │   ├── network/        # WebSocket client (reconnect, queue, gap detection)
+│   │   │   ├── storage/        # OS Keychain abstraction
+│   │   │   ├── utils/
+│   │   │   └── widgets/        # Reusable adaptive widgets
+│   │   └── features/
+│   │       ├── auth/           # Key-signing ceremony, identity, login screens
+│   │       ├── chat/           # Permanent group chat screens
+│   │       ├── ephemeral/      # "Raise flag" ephemeral chat screens
+│   │       ├── forum/          # Forum board screens (BLOCKED: group-key)
+│   │       ├── presence/       # Presence indicators
+│   │       └── profile/        # User profile screens
 │   ├── test/                   # Flutter unit and widget tests
 │   └── pubspec.yaml
 │

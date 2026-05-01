@@ -618,3 +618,209 @@ The hardcoded URL in `profile_screen.dart` (with its `// TODO: move to app confi
 
 **3. DON'T forget to implement `plaintextCache` invalidation on MLS epoch rotation.**
 `MessagesTable` has a `plaintextCache` column with a `BLOCKED(phase-3)` comment: "plaintextCache must be cleared on MLS epoch rotation." This is not a performance optimisation — it is a forward secrecy requirement. If the cache is populated by Phase 3's decryption wiring but never invalidated on epoch rotation, users will read post-rotation messages decrypted with pre-rotation cached keys. The MLS epoch rotation and the cache invalidation must be a single atomic operation, not two separate tasks that can be accidentally shipped out of order.
+
+---
+
+# Round 4 Feedback — Post Phase 3 Implementation
+
+> Seven expert personas review the Phase 3 implementation directly from source code and the stated deliverables. Each reviewer focused on: `AppConfig` provider wiring, public-key allowlist (`/admin/allowlist`), `DartCryptographyService` ECIES crypto, drift `OutboundQueueTable` persistence, last-message preview, forum title encryption (self-encrypt), ephemeral help-request chat (RAISED→ACTIVE→CLOSED state machine), and MLS scaffolding (`mls_key_packages`, `mls_commits`, `MlsService` stub).
+
+---
+
+## 1. UX Designer — Round 4
+
+**What improved since Round 3**
+
+The FAB finally does something: a confirmation dialog before raising an ephemeral help request is exactly the right interaction design for a feature with irreversible side effects in a crisis-support context. The `MaterialBanner` notification for incoming help requests is idiomatic — it's dismissible, app-wide visible, and doesn't hijack navigation. Last-message preview with a relative timestamp in the conversation list is the single biggest usability improvement since Round 1; users can now tell at a glance which conversations have new activity without opening each one.
+
+**New concerns introduced in Phase 3**
+
+The forum title encryption produces `🔒 [encrypted title]` for every other group member's posts. This will be experienced as a broken app. A user who writes "Need urgent help — housing crisis" as a forum title will see it clearly on their own device. Every helper who opens the forum will see `🔒 [encrypted title]`. They cannot tell whether the request is urgent or routine, whether to respond or wait. The feature is technically correct (self-encrypt before the group key exists) but the UX is indistinguishable from a bug. A UI label — "Titles visible after group key is set up" — or an explicit placeholder like "🔒 Post from [author name]" that at least shows the author would reduce confusion significantly.
+
+**[HIGH]** The `EphemeralChatScreen` "End session" button has no confirmation dialog, but the FAB that opens the session does. A user under stress who taps "End session" by accident permanently destroys an active conversation with no recovery. The asymmetry — confirm to open, no confirm to close — is a crisis-context UX failure. The close action should require the same confirmation treatment as the open.
+
+**[HIGH]** There is no visible timer or expiry indicator on an active ephemeral session. The state machine goes RAISED→ACTIVE→CLOSED but the user never knows how long a session has been open or if it will auto-close. A helper who joins 30 minutes late has no way to know whether the session is still relevant or whether the original requester has already been helped elsewhere. Even a simple "Session open for N minutes" subtitle in `EphemeralChatScreen` would orient participants.
+
+**[MEDIUM]** The two fallback strings — `🔒 Encrypted message` and `🔒 Decryption failed` — are shown in message bubbles without context. A user who sees `🔒 Decryption failed` in the middle of a conversation has no actionable path: can they request a re-send? Is their key corrupt? Should they contact an admin? The fallback covers the error but surfaces no recovery UX.
+
+**[LOW]** The relative timestamp on last-message preview ("just now", "2 min ago") is the right design and the implementation mirrors the `_formatRelativeTime` pattern from forum posts — consistent language across the app is a small but meaningful trust signal for users.
+
+**Concrete Phase 4 recommendation**
+
+Before Phase 4 ships, replace `🔒 [encrypted title]` with `🔒 Post by [displayName]` so helpers can at least see who needs support even without the title text. The author's identity is already server-visible metadata and loses nothing by being shown. This requires one line of change in the forum list rendering and prevents the feature from shipping as a user-visible regression.
+
+**Risk rating: MEDIUM** — The core UX is functional, but the session close asymmetry and the opaque `🔒 [encrypted title]` placeholder will erode tester and early user confidence before Phase 4 ships the group key that fixes the underlying issue.
+
+---
+
+## 2. Security Expert — Round 4
+
+**What improved since Round 3**
+
+The public key allowlist is the most important security improvement in Phase 3. Rejecting unknown keys at the server layer (403 Forbidden) means a compromised credential from outside the trusted group cannot be used to receive messages or join the routing graph. The `BOOTSTRAP_ADMIN_KEY` mechanism is the right approach for bootstrapping without a chicken-and-egg problem. Forum title encryption — even self-encrypt only — closes the plaintext title gap that was rated HIGH in Round 3; titles are no longer stored verbatim in the database or emitted in server traces. The `clearPlaintextCacheForGroup()` hook, placed at the MLS epoch rotation site, correctly identifies forward secrecy as a cache invalidation problem and creates the right seam for Phase 4.
+
+**New concerns introduced in Phase 3**
+
+**[HIGH]** Forum title encryption is self-encrypt: the title is encrypted with the author's own key, not a shared group key. This means only the author can decrypt it. Every other group member sees `🔒 [encrypted title]`. The server stores an opaque BYTEA blob it cannot read — which is the stated design goal — but the confidentiality property is achieved by making the content unreadable to everyone, including legitimate readers. This is not group confidentiality; it is content destruction. Until the group key exists, the only choices are: store plaintext (Round 3's HIGH risk), or store self-encrypted content that is unreadable to the group. Accepting the self-encrypt approach is fine as a temporary measure, but it must be documented as an explicitly broken state with a hard Phase 4 gate — not just a BLOCKED comment.
+
+**[HIGH]** `BOOTSTRAP_ADMIN_KEY` as an environment variable at server startup: what is the fail-closed behavior when this variable is absent or empty? If the allowlist defaults to "allow all" on empty `BOOTSTRAP_ADMIN_KEY`, the server ships with no access control until an admin explicitly adds entries. This is a deployment footgun — a server brought up without the env var set would accept any key. The allowlist must default to "allow none" and the server should refuse to start (or log a prominent warning) when `BOOTSTRAP_ADMIN_KEY` is unset. Validate this in `config.dev.toml` and in the infra `docker-compose.yml`.
+
+**[HIGH]** `DartCryptographyService` implements per-message ECIES (X25519+HKDF+ChaCha20-Poly1305). For a group message to 20 members, either: (a) the message is encrypted once to the server's key and the server decrypts it for routing — which means the server can read everything, violating the core design principle; or (b) the message is encrypted 20 times, once per recipient key — which means O(N) ECIES operations per send and N copies stored on the server. Neither is acceptable as the long-term group crypto model. The current implementation needs a clear annotation stating which of these is happening and an explicit `BLOCKED(mls-phase-4)` referencing the MLS replacement. If option (a) is currently the implementation, it must be highlighted as a Phase 4 blocker, not merely a performance concern.
+
+**[MEDIUM]** The `/admin/allowlist` CRUD endpoints: the security model for who may add or remove keys is not stated in the deliverables. If any valid JWT can POST to `/admin/allowlist`, a group member can add an attacker's key without consensus. The stated design principle is "no single admin" with 2/3 consensus for member changes. The allowlist API as described gives unilateral key-add power to whoever holds a valid JWT. Even a simple "only the bootstrap admin key holder may modify the allowlist" check would be more defensible than the current implied "any authenticated user."
+
+**[LOW]** The `mls_key_packages` and `mls_commits` database tables being established before the implementation is correct security architecture practice. Migrating schema after MLS is wired risks subtle type errors in key package serialization; having the BYTEA columns defined means the Phase 4 implementation can focus on the protocol logic rather than schema migration.
+
+**Concrete Phase 4 recommendation**
+
+Before Phase 4 ships MLS group key distribution, explicitly document and test the fail-closed behavior of `BOOTSTRAP_ADMIN_KEY`: an absent or empty value must cause the server to start with an empty allowlist (zero admitted keys), log `WARN: BOOTSTRAP_ADMIN_KEY is unset — allowlist is empty, all connections will be rejected` at startup, and reject all connections until a key is added via a privileged bootstrap mechanism. Add an integration test that starts the server without the env var and asserts that a connection attempt returns 403.
+
+**Risk rating: HIGH** — Three HIGH items remain open: the ambiguous group ECIES implementation potentially routes through the server, the self-encrypt forum title is functionally broken for group confidentiality, and the `BOOTSTRAP_ADMIN_KEY` fail-open risk creates a deployment footgun.
+
+---
+
+## 3. Bored Senior Developer — Round 4
+
+**What improved since Round 3**
+
+`AppConfig` via `--dart-define` is the right fix and it's implemented correctly — a Riverpod provider that reads compile-time constants means the URL is injected at build time, not hardcoded, and can be overridden per environment without a rebuild. The persistent `OutboundQueueTable` actually being wired to `WsClient` finally closes the crash-safety gap that was flagged in Round 2 and deferred through Round 3. The `BLOCKED(mls-phase-4)` comment convention is consistently applied throughout the MLS scaffolding — every stub method, every placeholder endpoint, and every skipped validation is tagged with its migration target. This is exactly the kind of technical debt annotation that doesn't age badly.
+
+**New concerns introduced in Phase 3**
+
+**[HIGH]** The ephemeral chat state machine is distributed: client holds local state (RAISED/ACTIVE/CLOSED), server holds authoritative state. The spec requirement is that all transitions are idempotent, but this is an assertion about the implementation, not a property enforced by the type system or a test. If `close_session` in the server handler is not idempotent — if it calls `DELETE FROM ephemeral_sessions WHERE id = $1` and then tries to broadcast a CLOSED event to participants, a duplicate CLOSE from a reconnecting client will hit a `None` on the session lookup and either panic or return an unhandled error. Show me the test that sends CLOSE twice and asserts the second one returns 200 rather than 500.
+
+**[MEDIUM]** `MlsService` is a stub returning placeholder values. The Riverpod provider that injects it — presumably `mlsServiceProvider` — will be called by `WsClient` or `ChatScreen` during Phase 4. When a stub method returns `null` or an empty `Uint8List`, the caller's handling of that return value sets the behavior for the actual MLS implementation. If the stub silently returns garbage that the caller ignores, the Phase 4 MLS implementation will discover its integration contract only at runtime. Stubs should either `throw UnimplementedError()` to force callers to handle the not-ready case, or return typed sentinel values with explicit contracts.
+
+**[MEDIUM]** `DartCryptographyService` lives in `client/lib/crypto/`. The backend has its own crypto wrappers in `backend/src/crypto/`. Phase 4's MLS implementation will need to share key package serialization formats between client and server. If the two crypto modules independently derive their serialization (one in Dart, one in Rust), the first cross-platform decryption test will fail because the byte layouts don't match. The `shared/src/lib.rs` serde types are the right place to pin the MLS key package wire format — establish that now before two implementations diverge.
+
+**[LOW]** The `clearPlaintextCacheForGroup()` method name is precise and self-documenting. Whoever named it understood that "clear cache" without a scope is a footgun — the group parameter ensures only the relevant epoch's cache is invalidated, not the entire message store. Small win.
+
+**Concrete Phase 4 recommendation**
+
+Write a `MockMlsService` that throws `UnimplementedError` for every stub method and make it the default in tests. This forces every Phase 4 feature that touches MLS to explicitly handle the "MLS not ready" case rather than silently receiving null. The mock should be in `test/mocks/` and re-exported by the test harness so all widget tests that touch crypto automatically get the strict version.
+
+**Risk rating: MEDIUM** — The architecture is on the right track but three fault lines need attention before Phase 4 complexity lands on them: the unverified idempotency of the state machine, the ambiguous stub contract for `MlsService`, and the risk of Dart/Rust serialization divergence on key packages.
+
+---
+
+## 4. Senior Architect — Round 4
+
+**What improved since Round 3**
+
+The `AppConfig` provider resolves the hardcoded localhost issue that was a DON'T in Round 3 and had survived from Phase 1. The persistent outbound queue finally closes the architecture gap that was flagged in Round 2's consolidated recommendations and deferred twice — `OutboundQueueTable` with `queuedAt` and `attempts` columns is the right schema for a retry-with-backoff queue. The public key allowlist enforcement at the WS connection layer (before JWT validation reaches routing logic) is the correct architectural placement — it gates the trust domain at the perimeter rather than deep in the request handler. MLS scaffolding tables (`mls_key_packages`, `mls_commits`) being defined before the implementation is the correct migration-first architecture approach.
+
+**New concerns introduced in Phase 3**
+
+**[HIGH]** The offline group message delivery gap — flagged as a DON'T in Round 3 — is still open, and Phase 3 has made it architecturally worse. The `mls_commits` table implies that MLS `Commit` and `Welcome` messages will be distributed as group messages. If a member is offline when a `Commit` is broadcast (e.g., during an ephemeral chat key rotation), they miss the epoch transition. They cannot decrypt subsequent group messages and have no recovery path short of being manually re-added by the group admin. The MLS protocol defines a recovery mechanism (re-joining via a new `Welcome`), but the architecture for triggering it — "member comes online, detects epoch mismatch, requests re-invite" — is not present in the current design. This must be designed before Phase 4 wires actual MLS commits, not discovered when the first member misses a key rotation.
+
+**[HIGH]** The ephemeral chat sessions live in server-side state that is not persisted to PostgreSQL. The known gaps note "Redis session store — currently in-memory HashMap — single-node only." The RAISED→ACTIVE→CLOSED state machine is entirely lost on server restart. If the server restarts while a session is ACTIVE, the clients hold local ACTIVE state indefinitely. They will attempt to send messages that the server routes to a session that no longer exists. There is no timeout mechanism on the client side to detect server-side session loss. The state machine spec says "the server must handle duplicate CLOSE or DELETE events without corrupting state" — but a server restart isn't a duplicate event; it's a state erasure. Persist ephemeral session state to PostgreSQL with a TTL, even if the messages themselves are not persisted.
+
+**[MEDIUM]** The `/admin/allowlist` CRUD endpoints represent a new privileged API surface that sits outside the existing WebSocket routing architecture. All other sensitive operations (message relay, key package upload) go through the authenticated WS connection. The allowlist admin API is a REST endpoint using what authorization mechanism? If it shares the same JWT validation middleware as the forum and profile endpoints, then any group member with a valid session JWT can modify the allowlist. The allowlist admin API should require a separate, higher-privilege credential — or at minimum, verify that the JWT holder's public key is in a designated admin set.
+
+**[LOW]** The `attempts` column in `OutboundQueueTable` is the right foundation for exponential backoff. Pairing it with a `lastAttemptedAt` timestamp would allow the client to implement delay-based retry without storing the backoff state in memory — particularly important for messages queued across app restarts.
+
+**Concrete Phase 4 recommendation**
+
+Design the MLS epoch recovery flow before writing the `openmls` integration: define what happens when `ws_handler.rs` receives a message from a client whose stored epoch is behind the current group epoch. The server should detect the mismatch (epoch ID in message envelope vs. current epoch in `mls_commits`), reject the message with a structured error code (e.g., `4010 EPOCH_MISMATCH`), and the client should respond by requesting a new `Welcome` from the group. This flow must be a first-class design document before Phase 4 ships — retrofitting epoch recovery onto a running MLS implementation is the hardest category of distributed systems bug.
+
+**Risk rating: HIGH** — Two HIGH architectural gaps remain that Phase 4 will collide with directly: offline members missing MLS epoch transitions have no recovery path, and ephemeral session state erasure on server restart leaves clients in an inconsistent state indefinitely.
+
+---
+
+## 5. Normal Programmer — Round 4
+
+**What improved since Round 3**
+
+`AppConfig` is a clean implementation — `--dart-define=SERVER_URL=https://...` at build time, read via `String.fromEnvironment()` in the provider, with a sensible localhost default for development. No more `grep -r localhost` hunts before deployment. The BLOCKED comment convention has been consistently applied to the MLS scaffolding and the comments are now specific enough to be actionable: `BLOCKED(mls-phase-4): replace stub with openmls KeyPackage generation` tells the next developer exactly what code to write, not just that something is missing.
+
+**New concerns introduced in Phase 3**
+
+**[MEDIUM]** `🔒 Encrypted message` vs `🔒 Decryption failed` — as a developer reading the code that produces these strings, what is the difference? The first presumably appears when a message is received but decryption is not yet possible (e.g., key not loaded), the second when decryption was attempted and produced an error. But these look identical to the user and their code paths are presumably different. Name the constants explicitly: `kMessagePendingDecryption` and `kDecryptionErrorPlaceholder`, add a one-line comment at each constant definition explaining when it appears, and centralise them in a `crypto_strings.dart` constants file so a future developer doesn't add a third variant by copy-pasting.
+
+**[MEDIUM]** `DartCryptographyService` is named for its implementation technology rather than its role. When Phase 4 adds the `openmls`-backed group crypto, there will be at least two implementations: `DartCryptographyService` (ECIES 1:1) and something like `MlsCryptographyService` (group). The `CryptoService` interface is the right abstraction, but the Riverpod provider selection logic — "use MLS service for group messages, ECIES for DMs" — does not yet exist. Adding this dispatch logic as an afterthought when both services are simultaneously live will be messy. Design the provider selection strategy now: a `groupCryptoServiceProvider` and a `dmCryptoServiceProvider` would make the dispatch explicit at the callsite.
+
+**[MEDIUM]** The `EphemeralChatScreen` is a new screen. Does it use the same `WsClient` singleton that `ChatScreen` uses? If so, `_handleRawMessage` in `WsClient` now needs to demultiplex three message types: group messages, DMs, and ephemeral chat messages. If that handler is a growing `if/else` or `switch`, it will become the most-edited file in the codebase over the next two phases. A handler registry — `Map<String, Function(Map<String, dynamic>)>` keyed by message type — would allow each screen to register and deregister its handler on mount/unmount rather than requiring a central dispatcher to know about every screen.
+
+**[LOW]** The `MaterialBanner` for ephemeral chat notifications is the right primitive choice. It requires no additional package dependency and is natively accessible, which rounds out the accessibility story for this feature. Good call.
+
+**Concrete Phase 4 recommendation**
+
+Before Phase 4 adds MLS message handling to `_handleRawMessage`, refactor the method to use a handler registry pattern. Each message type (`chat`, `ephemeral`, `mls_commit`, `mls_welcome`) registers a handler function. `_handleRawMessage` dispatches by `message['type']` to the registered handler, logging an unhandled-type warning for anything not registered. This is a 50-line refactor now that will prevent a 500-line dispatcher from emerging organically as Phase 4 adds MLS message types.
+
+**Risk rating: MEDIUM** — The code is readable and the BLOCKED comments tell a coherent story. The main Phase 4 risk is that two simultaneous crypto service implementations (ECIES and MLS) with no dispatch strategy will produce subtle "wrong service selected" bugs that are invisible to the type checker.
+
+---
+
+## 6. QA Champion — Round 4
+
+**What improved since Round 3**
+
+The confirmation dialog before raising an ephemeral help request means the "accidental flag raise" path is now explicitly gated — a test can assert that the flag is not raised until the confirmation is accepted. The persistent `OutboundQueueTable` means delivery tests can now assert "message is in the queue after send" and "message is removed from the queue after ACK" as durable state assertions, not race-prone in-memory checks. `AppConfig` via `--dart-define` means integration tests can target a local test server at `http://localhost:8000` without modifying source code.
+
+**New concerns introduced in Phase 3**
+
+**[HIGH]** The ephemeral chat state machine has no test coverage for invalid transitions. A test matrix is required: RAISED→RAISED (double-raise from same client), RAISED→CLOSED (close before anyone joins), ACTIVE→RAISED (re-raise while active), CLOSED→ACTIVE (late join after close), CLOSED→CLOSED (duplicate CLOSE from reconnect). The spec says all transitions are idempotent — that means "CLOSED→CLOSED returns 200 and does nothing," not "CLOSED→CLOSED returns 500." Without these tests, a reconnecting client that replays its last event (CLOSE) will trigger an unhandled state machine error in production.
+
+**[HIGH]** `DartCryptographyService.decrypt()` returns a fallback placeholder string on failure rather than throwing. This makes negative-path testing deceptively easy: a test that calls `decrypt()` with a wrong key and asserts the result is not null will pass — but it's asserting the wrong property. The actual security property is "decrypt with wrong key does NOT return the plaintext." The fallback pattern makes it structurally impossible to write a test that fails when the wrong key accidentally decrypts a message. Add a property-based test: generate a random keypair B distinct from keypair A, encrypt a message to A, attempt to decrypt with B, assert the result is `kDecryptionErrorPlaceholder` (not the original plaintext, and not a successful decryption).
+
+**[MEDIUM]** Outbound queue retry ordering: the `OutboundQueueTable` retries on reconnect. Is the drain ordered by `queuedAt ASC` (FIFO)? If the retry implementation issues all pending sends concurrently (a `Future.wait` over all queued messages), the server will receive them in non-deterministic order. A test that queues messages A, B, C and asserts the recipient sees them in order A, B, C will be flaky unless the drain is explicitly sequential.
+
+**[MEDIUM]** The allowlist `403 Forbidden` for unknown public keys: at what point in the request lifecycle is this check performed? If the check is in a middleware that runs before JWT validation, an unauthenticated request with an unknown public key returns 403. An unauthenticated request with a known public key but no JWT returns 401. This ordering is observable by an attacker probing the allowlist: try known vs. unknown keys unauthenticated, observe 401 vs. 403, enumerate the allowlist without credentials. A test that sends an unauthenticated request with a known key vs. an unknown key and asserts both return 401 (not distinguishing based on allowlist membership) would verify the check order is correct.
+
+**[LOW]** The `AppDatabase.forTesting()` constructor now enables an `OutboundQueueTable` persistence test that was previously blocked by the in-memory queue. Writing this test is a bounded, well-defined task: insert a message into `OutboundQueueTable`, simulate an app restart (re-initialize the DB), assert the message is still present, drain the queue, assert it is gone. This test would have caught the Round 2 and Round 3 persistence gap before it was filed as a finding.
+
+**Concrete Phase 4 recommendation**
+
+Write the ephemeral state machine transition matrix as a parameterized test before Phase 4 adds any features that depend on the session lifecycle. Define an enum of valid and invalid transitions, assert valid ones return the correct next state, and assert invalid ones return an idempotent response (same state, 2xx) rather than an error. Run these tests against the server's `EphemeralSession` handler directly (not through the WebSocket), so they are fast and deterministic.
+
+**Risk rating: HIGH** — The decrypt-fallback pattern structurally prevents the most important security property test from being written, and the state machine has no transition coverage. Both gaps will allow correctness regressions to ship silently.
+
+---
+
+## 7. Performance Tester — Round 4
+
+**What improved since Round 3**
+
+The persistent outbound queue with the `attempts` counter is a meaningful performance improvement for reconnect behaviour: exponential backoff can be computed from `attempts` without in-memory state, which means the backoff schedule survives app restarts. `AppConfig` centralises the server URL, eliminating the possibility of a test accidentally sending traffic to localhost and measuring localhost latency instead of network latency. The `mls_key_packages` and `mls_commits` tables use BYTEA columns — compact binary storage rather than JSON text — which is the right choice for cryptographic material that will be fetched frequently in Phase 4.
+
+**New concerns introduced in Phase 3**
+
+**[HIGH]** `DartCryptographyService` performs X25519 key agreement + HKDF + ChaCha20-Poly1305 on the Dart main isolate. For a group of 20 members, a group message send requires 20 independent ECIES operations (one per recipient key). On a 2019 mid-range Android device, a single X25519 key agreement in Dart takes approximately 2–5ms. Twenty operations is 40–100ms of synchronous crypto on the UI thread per outbound group message. The compose bar will freeze noticeably on every send. This is not a Phase 4 problem — it is a Phase 3 problem that is already in production code. Move encryption to `compute()` (for one-shot operations) or a long-lived `Isolate` with a port (for streaming encryption of large messages).
+
+**[MEDIUM]** The persistent outbound queue retry-on-reconnect drains all pending messages when the WS connection is re-established. If a user was offline during an active group conversation and has 50 queued outbound messages, all 50 are drained on reconnect. Each drain step requires a `DartCryptographyService.encrypt()` call (if messages are queued as plaintext and encrypted on send) or a direct WS send (if messages are queued pre-encrypted). If the former, 50 reconnect sends = 50 × 20 = 1,000 ECIES operations in a burst on the UI isolate. The drain must be rate-limited (e.g., 5 messages/second with jitter) and must run on a background isolate.
+
+**[MEDIUM]** The `/admin/allowlist` endpoints perform a database read on every key verification. If allowlist checking occurs on every WS message (not just at connection establishment), a group of 20 members sending at 1Hz generates 20 allowlist DB reads per second. The allowlist changes rarely — add/remove member events. Cache the allowlist in-process (an `Arc<RwLock<HashSet<PublicKeyBytes>>>`) and invalidate only on admin write operations. The current architecture does not indicate where the allowlist check is positioned in the message handling pipeline; if it is per-message rather than per-connection, this is an immediate performance issue.
+
+**[LOW]** The `MaterialBanner` for ephemeral chat notifications uses `AnimatedSwitcher` with a `SizeTransition`. The animation frame rate is independent of the message stream and does not trigger message list rebuilds. This is the correct Flutter performance pattern for a notification overlay — it was called out as a potential issue in Round 3 for the `ConnectionBanner` and has been applied consistently here.
+
+**Concrete Phase 4 recommendation**
+
+Before Phase 4 wires MLS key distribution — which involves key package fetches for all N members — define a `POST /mls/key-packages/batch` endpoint that accepts a list of user IDs and returns all their current key packages in a single response. Phase 4's `Welcome` operation requires key packages for every existing member. N individual `GET /mls/key-packages/:id` requests is O(N) round-trips; a batch endpoint is O(1). Building the batch endpoint after the MLS client is already coded against individual endpoints requires a client-side refactor. Design the API contract now.
+
+**Risk rating: HIGH** — The synchronous ECIES encryption on the UI isolate for group messages is an immediately measurable performance regression in Phase 3 production code, not a future concern. Twenty operations per group send will produce visible UI jank on mid-range hardware at the target deployment context.
+
+---
+
+## Phase 4 Recommendations (consolidated from Round 4)
+
+### Top 3 DOs for Phase 4
+
+**1. DO move all ECIES encryption off the UI isolate before Phase 4 adds MLS key operations.**
+`DartCryptographyService` currently runs X25519+HKDF+ChaCha20-Poly1305 on the Dart main isolate. For a 20-member group, this is 20 key-encapsulation operations per send — 40–100ms of crypto that freezes the compose bar. Wrapping `DartCryptographyService.encrypt()` in `compute()` is a one-afternoon change. Phase 4's MLS operations (tree hashing, ratchet updates) are more expensive than ECIES per-message. If the crypto is still on the UI isolate when MLS lands, every group message send will produce a perceptible freeze on the target hardware.
+
+**2. DO design the MLS epoch recovery flow before writing the `openmls` integration.**
+An offline member who misses a `Commit` message cannot decrypt subsequent group messages and has no recovery path in the current architecture. Define the full recovery sequence — client detects epoch mismatch on receive, sends `4010 EPOCH_MISMATCH` error to server, server triggers a re-invite `Welcome` from the group epoch holder — as a state diagram and write it into `docs/ephemeral-state-machine.md` (or a new `docs/mls-epoch-recovery.md`) before any Phase 4 MLS code is written. The MLS spec defines this mechanism; the implementation must reflect it.
+
+**3. DO persist ephemeral session state to PostgreSQL with a TTL before Phase 4 ships any ephemeral chat feature that users depend on.**
+The RAISED→ACTIVE→CLOSED state machine is entirely in-memory and is erased on server restart. A server reboot during a crisis session leaves clients stuck in ACTIVE with no timeout mechanism. Persisting session state (session ID, raiser ID, participants, state, created_at) to a `ephemeral_sessions` PostgreSQL table with a `expires_at` column and a background cleanup task closes this gap with a single well-scoped migration.
+
+### Top 3 DON'Ts for Phase 4
+
+**1. DON'T ship `BOOTSTRAP_ADMIN_KEY` with fail-open behavior.**
+An absent or empty `BOOTSTRAP_ADMIN_KEY` must cause the server to start with an empty allowlist that rejects all connections, not an allowlist that accepts all keys. The current behavior is not specified in the deliverables, which means it was probably not tested. An integration test that starts the server without `BOOTSTRAP_ADMIN_KEY` and asserts that all connection attempts return 403 must exist before Phase 4 ships to any non-development environment.
+
+**2. DON'T let `MlsService` stubs return `null` or empty bytes without a contract.**
+Every stub method in `MlsService` that returns `null`, an empty `Uint8List`, or a placeholder value is a silent contract violation waiting to become a runtime bug when Phase 4 replaces the stub. Change all stub returns to `throw UnimplementedError('MlsService.${method}: not yet implemented — see BLOCKED(mls-phase-4)')`. This converts silent misbehavior into an explicit error that surfaces immediately in tests, rather than a subtle decryption failure that surfaces in production.
+
+**3. DON'T wire the Phase 4 MLS group crypto without first resolving whether group message ECIES currently routes through the server key.**
+If `DartCryptographyService` currently encrypts group messages to the server's X25519 public key (option a — the server can read everything), this is an active security regression, not a future gap. If it encrypts to each recipient's key individually (option b — N copies per message), the server storage model is already incorrect for MLS. Either way, the current group ECIES design must be audited and explicitly documented before MLS is layered on top of it. Building MLS on an undocumented group crypto assumption is how subtle "the server was always decrypting these" bugs survive into production.

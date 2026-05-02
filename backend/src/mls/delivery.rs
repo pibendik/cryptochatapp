@@ -102,8 +102,10 @@ impl MlsDeliveryService {
 /// A KeyPackage that has passed full validation (signature + lifetime).
 pub struct ValidatedKeyPackage {
     /// Hex-encoded signature public key from the leaf node.
+    /// Used by handlers to verify the submitter matches the KeyPackage identity.
     pub identity: String,
     /// Hash-based reference to this KeyPackage (used for Welcome routing).
+    /// Used when sending MLS Welcome messages to a specific new member.
     pub kp_ref: KeyPackageRef,
 }
 

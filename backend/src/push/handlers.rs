@@ -33,7 +33,7 @@ pub async fn register_token(
     State(pool): State<DbPool>,
     auth: AuthUser,
     Json(body): Json<RegisterRequest>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
+) -> Result<Json<RegisterResponse>, AppError> {
     if body.platform != "apns" && body.platform != "fcm" {
         return Err(AppError::BadRequest(
             "platform must be 'apns' or 'fcm'".into(),
@@ -67,7 +67,7 @@ pub async fn register_token(
     .await
     .map_err(AppError::Database)?;
 
-    Ok((StatusCode::OK, Json(json!({ "registered": true }))))
+    Ok(Json(RegisterResponse { registered: true }))
 }
 
 /// DELETE /push/register

@@ -1,9 +1,6 @@
-import 'dart:io';
-
 import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+
+import 'connection.dart';
 
 part 'app_database.g.dart';
 
@@ -215,10 +212,4 @@ class AppDatabase extends _$AppDatabase {
       );
 }
 
-LazyDatabase _openConnection() {
-  return LazyDatabase(() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dir.path, 'cryptochat.db'));
-    return NativeDatabase.createInBackground(file);
-  });
-}
+QueryExecutor _openConnection() => openDatabaseConnection();

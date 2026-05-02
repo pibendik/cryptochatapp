@@ -94,26 +94,40 @@ Data flow on send:
 ### Backend (Rust)
 
 ```bash
-# 1. Start just the database
+# 1. Create your local env files (never committed — gitignored)
+cp infra/.env.example infra/.env
+# Edit infra/.env — minimum changes for local dev:
+#   POSTGRES_PASSWORD=devpassword
+#   DATABASE_URL=postgresql://chatapp:devpassword@postgres:5432/chatapp
+#   APP_ENV=development        ← skips production safety checks
+
+# Create backend/.env so cargo run picks up the DB URL automatically:
+cat > backend/.env << 'EOF'
+DATABASE_URL=postgresql://chatapp:devpassword@localhost:5432/chatapp
+APP_ENV=development
+RUST_LOG=info
+SERVER_ADDR=0.0.0.0:8080
+EOF
+
+# 2. Start postgres (docker-compose.override.yml publishes port 5432 to localhost automatically)
 cd infra && docker compose up -d postgres
+# Wait for: "infra-postgres-1  Up (healthy)"
 
-# 2. Copy env and point at the local DB
-cp infra/.env.example .env
-# Edit .env:
-#   DATABASE_URL=postgresql://chatapp:change_me_in_production@localhost:5432/chatapp
-#   APP_ENV=development
-#   BOOTSTRAP_ADMIN_KEY=<your Ed25519 public key hex, 64 chars>
+# 3. Start the backend — runs all 18 migrations automatically on first start
+cd backend && cargo run
 
-# 3. Run migrations
-cd backend
-DATABASE_URL=postgresql://chatapp:change_me_in_production@localhost:5432/chatapp \
-  cargo sqlx migrate run --source src/db/migrations
+# You should see:
+#   INFO database pool established
+#   INFO database migrations applied
+#   INFO listening addr=0.0.0.0:8080
 
-# 4. Start the server
-cargo run
-
-# Server listens on http://localhost:8080 by default (set SERVER_ADDR in .env to change)
+# Verify:
+curl http://localhost:8080/health   # → {"status":"ok"}
 ```
+
+> **How the port works:** `infra/docker-compose.override.yml` (committed, dev-only) publishes
+> postgres port 5432 and backend port 8080 to `127.0.0.1` so `cargo run` can reach them directly.
+> In production, omit the override: `docker compose -f docker-compose.yml up -d`.
 
 **Useful backend commands:**
 
